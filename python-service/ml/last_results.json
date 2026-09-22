@@ -1,0 +1,39 @@
+{
+  "algorithm": "random_forest",
+  "n_samples": 800,
+  "n_train": 640,
+  "n_test": 160,
+  "n_compatible": 400,
+  "n_conflict": 400,
+  "training_time_s": 0.0424,
+  "accuracy": 1.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "confusion_matrix": [
+    [
+      80,
+      0
+    ],
+    [
+      0,
+      80
+    ]
+  ],
+  "false_positives": 0,
+  "false_negatives": 0,
+  "features": [
+    "same_node_type",
+    "same_name",
+    "same_function",
+    "same_class",
+    "line_overlap",
+    "overlap_ratio",
+    "structural_distance",
+    "op_combo_score",
+    "both_modify",
+    "delete_and_modify",
+    "node_type_a",
+    "node_type_b"
+  ]
+}
