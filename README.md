@@ -1,132 +1,98 @@
 # Weaver
 
-**ML-Assisted AST-Aware CRDT-Based Local-First Collaborative Python Code Editor**
+**Real-Time Collaborative Python Code Editor with AST-Aware ML Conflict Guard**
 
-A research prototype demonstrating:
+Weaver is a professional collaborative programming environment designed for concurrent Python development. It combines local-first CRDT synchronization (Yjs/YATA), real-time abstract syntax tree (AST) parsing, and machine learning conflict classification to detect and prevent semantic merge collisions as developers type.
 
 ```
-Concurrent Code Edits → CRDT Synchronization → AST Structural Analysis → ML-Based Conflict Classification
+Concurrent Edits ──► Yjs CRDT Sync ──► Real-time AST Parser ──► ML Conflict Guard ──► Sandboxed Subprocess Runner
 ```
+
+---
+
+## Key Features
+
+- **Multi-File Workspace**: Open, create, edit, close, and rename Python scripts with real-time multi-tab navigation.
+- **Inline File Renaming**: Rename any file directly from the Explorer sidebar or tab strip with validation and state preservation.
+- **Indentation Guide Lines**: Visual indentation guide lines with active block highlighting for Python control flow and function scopes.
+- **Code Execution Sandbox**: Run scripts directly within the editor with real-time stdout, stderr, execution duration, exit codes, and stdin support.
+- **Real-Time Collaboration**: Peer presence, live cursor sharing, and conflict-free concurrent editing powered by Yjs CRDTs over WebSockets.
+- **AST Conflict Guard**: Monitors active functions and classes across peers to detect overlapping modifications before commits occur.
 
 ---
 
 ## Quick Start
 
 ### Prerequisites
-- Node.js 18+
-- Python 3.9+
+- **Node.js**: v18 or later
+- **Python**: 3.9 or later
 
-### 1. Install dependencies (once)
+### 1. Install Dependencies
 
 ```bash
-# Frontend + backend
+# Frontend root
 npm install
+
+# Backend relay
 cd backend && npm install && cd ..
 
-# Python service
+# Python AST & execution service
 cd python-service && pip3 install -r requirements.txt && cd ..
 ```
 
-### 2. Start everything
+### 2. Start Services
+
+Start all services with a single command:
 
 ```bash
 bash start.sh
 ```
 
-| Service | URL |
-|---------|-----|
-| **Frontend** | http://localhost:5173 |
-| **Node.js relay** | ws://localhost:1234 |
-| **Python API** | http://localhost:8000/docs |
+Or start them individually:
+
+| Service | Command | Port / URL |
+|---|---|---|
+| **Python Service** | `cd python-service && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000` | `http://localhost:8000/docs` |
+| **Node.js Relay** | `cd backend && node server.js` | `ws://localhost:1234` / `http://localhost:1234` |
+| **Frontend UI** | `npm run dev` | `http://localhost:5173` |
 
 ---
 
-## Two-User Demo
+## Collaboration Workflow
 
-1. Open **Tab A** → http://localhost:5173 → **Create New Session**
-2. Copy the 6-character session ID
-3. Open **Tab B** → http://localhost:5173 → **Join Session** → paste ID
-4. Both users now share the same Python project via Yjs CRDT
-
-### Demo Scenarios (right panel)
-
-| Scenario | Change A | Change B | ML Result |
-|----------|----------|----------|-----------|
-| **Compatible** | modify `calculate()` | add `validate()` | ✅ Compatible |
-| **Conflict** | modify `calculate()` | modify `calculate()` | ⚠ Potential Conflict |
+1. Open `http://localhost:5173` in Browser 1 and click **New Workspace**.
+2. Click **Copy** next to the Workspace ID in the header or sidebar.
+3. Open `http://localhost:5173` in Browser 2, click **Join Workspace**, and enter the Workspace ID.
+4. Both users can concurrently edit, rename files, run scripts, and inspect live AST conflict guard updates.
 
 ---
 
-## Research Evaluation
+## Keyboard Shortcuts
 
-Click **Research Evaluation** in the header to:
-1. Generate a synthetic dataset
-2. Train the Random Forest / Logistic Regression / Gradient Boosting classifier
-3. Run a full evaluation comparing baseline vs ML classifier
-4. View confusion matrix, Accuracy, Precision, Recall, F1, FP, FN
+| Shortcut | Action |
+|---|---|
+| <kbd>⌘↵</kbd> / <kbd>Ctrl+Enter</kbd> | Run active Python script |
+| <kbd>⌘S</kbd> / <kbd>Ctrl+S</kbd> | Save active file to disk |
+| Double-click tab or file item | Inline file rename |
+| <kbd>Enter</kbd> / <kbd>Esc</kbd> | Confirm / Cancel file rename |
 
 ---
 
 ## Architecture
 
 ```
-Frontend (Vite + React + CodeMirror 6 + Yjs)
-    ↕ y-websocket (CRDT sync)
-Backend (Node.js + y-websocket relay)
-    ↕ HTTP REST proxy
+Frontend (React 19 + TypeScript + CodeMirror 6 + Yjs)
+    ├── CodeEditor: CodeMirror 6 with Python highlighting & indentation guides
+    ├── OutputPanel: Execution output, exit codes, and stdin stream
+    └── CollabPanel: Real-time peer awareness & AST conflict monitor
+          ↕ y-websocket (CRDT synchronizer)
+Backend (Express + WebSocket Server)
+    ├── Yjs CRDT WebSocket relay (port 1234)
+    └── REST API proxy to Python service
+          ↕ HTTP /api/*
 Python Service (FastAPI)
-    ├── AST Parser (Python ast module)
-    ├── Feature Extractor
-    ├── ML Classifier (scikit-learn)
-    ├── Dataset Generator
-    └── Evaluation Module
+    ├── AST Parser (Python ast module & node locator)
+    ├── Feature Extractor (12 structural & semantic features)
+    ├── ML Conflict Predictor (Gradient Boosting / Random Forest)
+    └── Sandboxed Runner (Subprocess executor with 10s hard timeout)
 ```
-
-## Tests
-
-```bash
-# Python (20 tests)
-cd python-service && python3 -m pytest ../tests/test_python_service.py -v
-
-# TypeScript type check
-npx tsc --noEmit
-```
-
-## Project Structure
-
-```
-weaver/
-├── src/                          # React frontend
-│   ├── editor/                   # CodeMirror 6 + Yjs bindings
-│   ├── collaboration/            # Yjs CRDT store
-│   ├── components/               # SessionGate, CollabPanel
-│   ├── conflict-ui/              # ConflictModal
-│   ├── research-dashboard/       # ResearchDashboard
-│   └── api/                      # API client
-├── backend/                      # Node.js relay server
-├── python-service/               # FastAPI + scikit-learn
-│   ├── ast_parser/               # Python AST module wrapper
-│   ├── ml/                       # ML classifier
-│   ├── dataset/                  # Synthetic data generator
-│   └── evaluation/               # Baseline comparison
-├── tests/                        # pytest test suite
-├── docs/research.md              # Full research documentation
-└── start.sh                      # One-command startup
-```
-
-## Research Documentation
-
-See [`docs/research.md`](docs/research.md) for:
-- Problem statement & research gap
-- Research question & hypothesis
-- System architecture
-- CRDT design (Yjs/YATA)
-- AST processing pipeline
-- Feature extraction (12 features)
-- ML methodology
-- Synthetic dataset generation
-- Experimental methodology
-- Evaluation metrics
-- Limitations & future work
-
-> ⚠ This is a research prototype. The synthetic dataset is designed for demonstration purposes. See docs/research.md for full limitations.

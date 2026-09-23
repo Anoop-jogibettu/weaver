@@ -1,214 +1,280 @@
-import React from 'react';
+import React, { useState } from 'react';
 
-interface ConflictData {
-  changeA: {
-    userId: string;
-    userName: string;
+export interface ConflictData {
+  proposalId?: string;
+  isNewFile?: boolean;
+  filename: string;
+  hostName: string;
+  collaboratorName: string;
+  hostContent: string;
+  collaboratorContent: string;
+  changes?: Array<{
     node_type: string;
     name: string;
     operation: string;
     line_start: number;
     line_end: number;
-  };
-  changeB: {
-    userId: string;
-    userName: string;
-    node_type: string;
-    name: string;
-    operation: string;
-    line_start: number;
-    line_end: number;
-  };
-  features: Record<string, number>;
-  prediction: {
+  }>;
+  prediction?: {
     label: number;
     confidence: number;
     prediction: string;
     explanation: string;
-    feature_importances: Record<string, number>;
-    inference_time_ms?: number;
   };
 }
 
 interface ConflictModalProps {
   conflict: ConflictData;
-  onAcceptA: () => void;
-  onAcceptB: () => void;
-  onKeepBoth: () => void;
-  onManual: () => void;
+  onAcceptCollaborator: () => void;
+  onKeepHost: () => void;
+  onMergeBoth: () => void;
+  onCustomMerge?: (mergedCode: string) => void;
   onClose: () => void;
 }
 
-const OpBadge: React.FC<{ op: string }> = ({ op }) => (
-  <span className={`op-badge ${op}`}>{op}</span>
-);
-
 export const ConflictModal: React.FC<ConflictModalProps> = ({
   conflict,
-  onAcceptA,
-  onAcceptB,
-  onKeepBoth,
-  onManual,
+  onAcceptCollaborator,
+  onKeepHost,
+  onMergeBoth,
+  onCustomMerge,
   onClose,
 }) => {
-  const { changeA, changeB, features, prediction } = conflict;
-  const topFeatures = Object.entries(prediction.feature_importances || {}).slice(0, 4);
+  const {
+    filename,
+    hostName,
+    collaboratorName,
+    hostContent,
+    collaboratorContent,
+    changes = [],
+    prediction,
+  } = conflict;
+
+  const [activeTab, setActiveTab] = useState<'compare' | 'custom'>('compare');
+  const [customText, setCustomText] = useState(collaboratorContent);
+
+  const isConflict = prediction ? prediction.label === 1 || prediction.prediction.toLowerCase().includes('conflict') : true;
+
+  const handleApplyCustom = () => {
+    if (onCustomMerge) {
+      onCustomMerge(customText);
+    } else {
+      onAcceptCollaborator();
+    }
+  };
 
   return (
     <div className="conflict-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="conflict-card">
+      <div className="conflict-card" style={{ maxWidth: 840 }}>
         {/* Header */}
         <div className="conflict-card-header">
-          <div className="icon">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <div className="icon" style={{ color: conflict.isNewFile ? '#38bdf8' : isConflict ? 'var(--yellow)' : 'var(--green)' }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
               <line x1="12" y1="9" x2="12" y2="13" />
               <line x1="12" y1="17" x2="12.01" y2="17" />
             </svg>
           </div>
           <div>
-            <h2>Potential Structural Conflict Detected</h2>
+            <h2>
+              {conflict.isNewFile ? `Review New File: ${filename}` : `Review & Resolve Merge: ${filename}`}
+            </h2>
             <p>
-              Two users have made concurrent changes to the same AST structure. ML confidence:{' '}
-              <strong style={{ color: 'var(--yellow)' }}>
-                {(prediction.confidence * 100).toFixed(1)}%
-              </strong>
+              {conflict.isNewFile ? (
+                <>
+                  Collaborator <strong style={{ color: 'var(--accent)' }}>{collaboratorName}</strong> created new file <strong style={{ color: '#38bdf8' }}>"{filename}"</strong> to add to the Host project.
+                </>
+              ) : (
+                <>
+                  Collaborator <strong style={{ color: 'var(--accent)' }}>{collaboratorName}</strong> proposed changes to merge into the Host version (<strong style={{ color: 'var(--green)' }}>{hostName}</strong>).
+                </>
+              )}
             </p>
           </div>
           <button
             onClick={onClose}
-            style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 18, lineHeight: 1 }}
+            style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}
           >
             ✕
           </button>
         </div>
 
-        {/* Change comparison */}
-        <div className="conflict-changes">
-          <div className="conflict-change-box">
-            <div className="conflict-change-label a">
-              User A — {changeA.userName}
-            </div>
-            <div className="conflict-change-code">
-              <div>
-                <OpBadge op={changeA.operation} />
-                <strong>{changeA.node_type}</strong>
-                {changeA.name && <> "<span style={{ color: 'var(--accent)' }}>{changeA.name}</span>"</>}
-              </div>
-              <div style={{ marginTop: 6, color: 'var(--text-muted)', fontSize: 11 }}>
-                Lines {changeA.line_start}–{changeA.line_end}
-              </div>
-            </div>
-          </div>
-
-          <div className="conflict-change-box">
-            <div className="conflict-change-label b">
-              User B — {changeB.userName}
-            </div>
-            <div className="conflict-change-code">
-              <div>
-                <OpBadge op={changeB.operation} />
-                <strong>{changeB.node_type}</strong>
-                {changeB.name && <> "<span style={{ color: 'var(--green)' }}>{changeB.name}</span>"</>}
-              </div>
-              <div style={{ marginTop: 6, color: 'var(--text-muted)', fontSize: 11 }}>
-                Lines {changeB.line_start}–{changeB.line_end}
-              </div>
-            </div>
-          </div>
+        {/* View Switcher */}
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)', padding: '0 16px' }}>
+          <button
+            style={{
+              background: 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'compare' ? '2px solid var(--accent)' : '2px solid transparent',
+              color: activeTab === 'compare' ? 'var(--text-primary)' : 'var(--text-muted)',
+              padding: '8px 12px',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            onClick={() => setActiveTab('compare')}
+          >
+            Side-by-Side Comparison
+          </button>
+          <button
+            style={{
+              background: 'transparent',
+              border: 'none',
+              borderBottom: activeTab === 'custom' ? '2px solid var(--accent)' : '2px solid transparent',
+              color: activeTab === 'custom' ? 'var(--text-primary)' : 'var(--text-muted)',
+              padding: '8px 12px',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            onClick={() => setActiveTab('custom')}
+          >
+            Manual Merge Editor
+          </button>
         </div>
 
-        {/* Meta */}
-        <div className="conflict-meta">
-          <div className="conflict-meta-item">
-            <span>Affected AST Node</span>
-            <span>
-              <code style={{ color: 'var(--accent)', fontSize: 12 }}>{changeA.node_type}</code>
-            </span>
-          </div>
-          <div className="conflict-meta-item">
-            <span>Node Name</span>
-            <span>
-              <code style={{ color: 'var(--text-primary)', fontSize: 12 }}>
-                {changeA.name || '—'}
-              </code>
-            </span>
-          </div>
-          <div className="conflict-meta-item">
-            <span>Same AST Node</span>
-            <span style={{ color: features.same_function || features.same_class || features.same_name ? 'var(--red)' : 'var(--green)' }}>
-              {features.same_function || features.same_class || features.same_name ? 'Yes ⚠' : 'No'}
-            </span>
-          </div>
-          <div className="conflict-meta-item">
-            <span>Line Overlap</span>
-            <span style={{ color: features.line_overlap ? 'var(--red)' : 'var(--green)' }}>
-              {features.line_overlap ? 'Yes ⚠' : 'No'}
-            </span>
-          </div>
-        </div>
+        {activeTab === 'compare' ? (
+          <>
+            {/* Side by side code comparison */}
+            <div className="conflict-changes">
+              <div className="conflict-change-box">
+                <div className="conflict-change-label a">
+                  Host Version ({hostName})
+                </div>
+                <div className="conflict-change-code" style={{ maxHeight: 280, overflowY: 'auto' }}>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>
+                    {hostContent || '(File is currently empty)'}
+                  </pre>
+                </div>
+              </div>
 
-        {/* ML Prediction */}
-        <div className="ml-prediction-box">
-          <div className="ml-prediction-label">
-            🤖 ML Classifier Result
-            {prediction.inference_time_ms !== undefined && (
-              <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
-                ({prediction.inference_time_ms.toFixed(1)}ms)
-              </span>
+              <div className="conflict-change-box">
+                <div className="conflict-change-label b">
+                  Collaborator Version ({collaboratorName})
+                </div>
+                <div className="conflict-change-code" style={{ maxHeight: 280, overflowY: 'auto' }}>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>
+                    {collaboratorContent || '(File is currently empty)'}
+                  </pre>
+                </div>
+              </div>
+            </div>
+
+            {/* AST Changes summary */}
+            {changes.length > 0 && (
+              <div style={{ padding: '8px 16px', background: 'var(--bg-elevated)', borderTop: '1px solid var(--border)', fontSize: 11 }}>
+                <span style={{ color: 'var(--text-muted)', textTransform: 'uppercase', fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', marginRight: 8 }}>
+                  Detected AST Changes:
+                </span>
+                {changes.map((c, i) => (
+                  <span key={i} style={{ display: 'inline-block', marginRight: 8, padding: '1px 5px', background: 'rgba(255,255,255,0.06)', borderRadius: 2 }}>
+                    <strong style={{ color: 'var(--accent)' }}>{c.operation}</strong> {c.node_type} <code>"{c.name}"</code> (L{c.line_start}–{c.line_end})
+                  </span>
+                ))}
+              </div>
             )}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span
-              className={`badge ${prediction.label === 0 ? 'badge-compatible' : prediction.confidence < 0.6 ? 'badge-uncertain' : 'badge-conflict'}`}
-              style={{ fontSize: 13 }}
-            >
-              {prediction.prediction}
-            </span>
-            <span style={{ fontFamily: 'JetBrains Mono', fontSize: 14, fontWeight: 700, color: 'var(--yellow)' }}>
-              {(prediction.confidence * 100).toFixed(1)}% confidence
-            </span>
-          </div>
-          <div className="ml-confidence-bar" style={{ marginTop: 8 }}>
-            <div
-              className="ml-confidence-fill"
-              style={{ width: `${prediction.confidence * 100}%` }}
+
+            {/* ML Prediction analysis */}
+            {prediction && (
+              <div className="ml-prediction-box" style={{ margin: '12px 16px 8px', borderLeftColor: isConflict ? 'var(--yellow)' : 'var(--green)' }}>
+                <div className="ml-prediction-label" style={{ color: isConflict ? 'var(--yellow)' : 'var(--green)' }}>
+                  ML Conflict Guard Analysis
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span className={`badge ${isConflict ? 'badge-conflict' : 'badge-compatible'}`}>
+                    {prediction.prediction}
+                  </span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {(prediction.confidence * 100).toFixed(1)}% confidence
+                  </span>
+                </div>
+                <div className="ml-explanation" style={{ marginTop: 6, fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                  {prediction.explanation}
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ padding: '12px 16px' }}>
+            <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '0 0 6px' }}>
+              Edit the resolved final code below that will be committed to the Host version:
+            </p>
+            <textarea
+              style={{
+                width: '100%',
+                height: 260,
+                background: '#0d0f14',
+                color: '#fff',
+                fontFamily: 'var(--font-mono)',
+                fontSize: 12,
+                lineHeight: 1.6,
+                padding: 10,
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)',
+                resize: 'vertical',
+                boxSizing: 'border-box',
+                outline: 'none',
+              }}
+              value={customText}
+              onChange={(e) => setCustomText(e.target.value)}
             />
           </div>
-          <div className="ml-explanation">{prediction.explanation}</div>
-
-          {topFeatures.length > 0 && (
-            <div style={{ marginTop: 10 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 6 }}>
-                Key Features (Importance)
-              </div>
-              {topFeatures.map(([feat, imp]) => (
-                <div key={feat} className="feature-bar-row">
-                  <span className="feature-bar-label">{feat.replace(/_/g, ' ')}</span>
-                  <div className="feature-bar-track">
-                    <div className="feature-bar-fill" style={{ width: `${Math.min(imp * 100 * 3, 100)}%` }} />
-                  </div>
-                  <span className="feature-bar-val">{(imp * 100).toFixed(0)}%</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        )}
 
         {/* Actions */}
-        <div className="conflict-actions">
-          <button className="conflict-action-btn primary" onClick={onAcceptA}>
-            Accept User A
-          </button>
-          <button className="conflict-action-btn" onClick={onAcceptB}>
-            Accept User B
-          </button>
-          <button className="conflict-action-btn" onClick={onKeepBoth}>
-            Keep Both
-          </button>
-          <button className="conflict-action-btn" onClick={onManual} style={{ color: 'var(--yellow)', borderColor: 'rgba(251,191,36,0.3)' }}>
-            Manual Resolve
-          </button>
+        <div className="conflict-actions" style={{ padding: '12px 16px', display: 'flex', gap: 8, justifyContent: 'flex-end', borderTop: '1px solid var(--border)' }}>
+          {conflict.isNewFile ? (
+            <>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={onKeepHost}
+                title="Decline this new file and do not add to project"
+              >
+                Decline New File
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={onAcceptCollaborator}
+                title={`Accept and add "${filename}" into project workspace`}
+                style={{ background: 'var(--green)', borderColor: 'var(--green)' }}
+              >
+                ✓ Accept &amp; Add "{filename}" to Project
+              </button>
+            </>
+          ) : activeTab === 'compare' ? (
+            <>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={onKeepHost}
+                title="Reject incoming merge and preserve current host code"
+              >
+                Keep Host Version
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={onMergeBoth}
+                title="Combine changes from both versions"
+              >
+                Merge Both
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={onAcceptCollaborator}
+                title="Accept collaborator changes and overwrite host code"
+              >
+                Accept Incoming ({collaboratorName})
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-secondary btn-sm" onClick={() => setActiveTab('compare')}>
+                Back to Comparison
+              </button>
+              <button className="btn btn-primary btn-sm" onClick={handleApplyCustom}>
+                Confirm &amp; Commit Merge
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

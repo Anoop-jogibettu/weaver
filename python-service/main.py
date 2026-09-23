@@ -11,7 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Any
+import ast
+from typing import Optional, Any, Dict, List
 
 from ast_parser.parser import parse_source, diff_asts, analyze_concurrent_changes
 from dataset.generator import generate_dataset, save_dataset, load_dataset, DATASET_PATH
@@ -57,6 +58,23 @@ class ClassifyRequest(BaseModel):
 class TrainRequest(BaseModel):
     algorithm: str = "random_forest"
     n_samples: int = 800
+
+class RunRequest(BaseModel):
+    source: str
+    filename: str = "script.py"
+    stdin: Optional[str] = None
+    all_files: Optional[Dict[str, str]] = None
+
+class ReplRequest(BaseModel):
+    code: str
+    session_id: Optional[str] = None
+
+class FormatRequest(BaseModel):
+    source: str
+
+class LintRequest(BaseModel):
+    source: str
+    filename: str = "script.py"
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -217,6 +235,196 @@ def demo_scenario(scenario: str = "compatible"):
         "features": features,
         "prediction": prediction,
     }
+
+
+
+# In-memory REPL session namespaces
+_repl_sessions: Dict[str, dict] = {}
+
+
+@app.post("/run")
+def run_endpoint(req: RunRequest):
+    """
+    Execute Python source code in a sandboxed directory subprocess.
+    Writes all workspace files into temporary directory to support cross-file imports.
+    Returns stdout, stderr, exit_code, and wall time (seconds).
+    Hard timeout: 10 seconds.
+    """
+    import subprocess
+    import tempfile
+    import time
+    import os
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # 1. Write all workspace files into tmp_dir so cross-file imports succeed
+        if req.all_files:
+            for fname, content in req.all_files.items():
+                if not fname:
+                    continue
+                target_path = os.path.join(tmp_dir, fname)
+                parent_dir = os.path.dirname(target_path)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
+                with open(target_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+
+        # 2. Write/overwrite active target source file
+        active_target = req.filename if req.filename.endswith(".py") else f"{req.filename}.py"
+        active_path = os.path.join(tmp_dir, active_target)
+        with open(active_path, "w", encoding="utf-8") as f:
+            f.write(req.source)
+
+        try:
+            t0 = time.monotonic()
+            result = subprocess.run(
+                [sys.executable, active_target],
+                input=req.stdin or "",
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=tmp_dir,
+            )
+            elapsed = round(time.monotonic() - t0, 3)
+            return {
+                "success": True,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.returncode,
+                "elapsed": elapsed,
+                "filename": req.filename,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "Execution timed out after 10 seconds.",
+                "exit_code": -1,
+                "elapsed": 10.0,
+                "filename": req.filename,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": str(e),
+                "exit_code": -1,
+                "elapsed": 0,
+                "filename": req.filename,
+            }
+
+
+@app.post("/repl")
+def repl_endpoint(req: ReplRequest):
+    """
+    Execute Python code in an interactive in-memory session.
+    Preserves variables and defined functions across evaluations.
+    """
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+    import traceback
+
+    session_key = req.session_id or "default"
+    if session_key not in _repl_sessions:
+        _repl_sessions[session_key] = {"__name__": "__main__"}
+
+    session_globals = _repl_sessions[session_key]
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    code = req.code.strip()
+
+    if not code:
+        return {"success": True, "stdout": "", "stderr": ""}
+
+    try:
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            # Try evaluating as an expression first
+            try:
+                compiled = compile(code, "<repl>", "eval")
+                res = eval(compiled, session_globals)
+                if res is not None:
+                    print(repr(res))
+            except SyntaxError:
+                # If syntax error, execute as a statement block
+                compiled = compile(code, "<repl>", "exec")
+                exec(compiled, session_globals)
+
+        out = stdout_buf.getvalue()
+        err = stderr_buf.getvalue()
+        return {
+            "success": True,
+            "stdout": out,
+            "stderr": err,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "stdout": stdout_buf.getvalue(),
+            "stderr": traceback.format_exc(),
+        }
+
+
+@app.post("/format")
+def format_endpoint(req: FormatRequest):
+    """
+    Format Python source code cleanly.
+    Tries autopep8 / black if installed, else AST roundtrip normalization.
+    """
+    code = req.source
+
+    # Try autopep8
+    try:
+        import autopep8
+        formatted = autopep8.fix_code(code)
+        return {"success": True, "formatted": formatted}
+    except Exception:
+        pass
+
+    # Try black
+    try:
+        import black
+        formatted = black.format_str(code, mode=black.Mode())
+        return {"success": True, "formatted": formatted}
+    except Exception:
+        pass
+
+    # Fallback to ast.unparse (Python 3.9+) if valid syntax
+    try:
+        tree = ast.parse(code)
+        formatted = ast.unparse(tree)
+        return {"success": True, "formatted": formatted}
+    except Exception as e:
+        return {"success": False, "formatted": code, "error": str(e)}
+
+
+@app.post("/lint")
+def lint_endpoint(req: LintRequest):
+    """
+    Check Python syntax diagnostics using AST parser.
+    Returns line, column, and error message.
+    """
+    diagnostics = []
+    try:
+        ast.parse(req.source, filename=req.filename)
+    except SyntaxError as e:
+        diagnostics.append({
+            "line": e.lineno or 1,
+            "col": e.offset or 1,
+            "end_line": getattr(e, "end_lineno", None) or e.lineno or 1,
+            "end_col": getattr(e, "end_offset", None) or (e.offset or 1) + 1,
+            "message": e.msg or "Syntax error",
+            "severity": "error",
+        })
+    except Exception as e:
+        diagnostics.append({
+            "line": 1,
+            "col": 1,
+            "end_line": 1,
+            "end_col": 2,
+            "message": str(e),
+            "severity": "error",
+        })
+    return {"success": len(diagnostics) == 0, "diagnostics": diagnostics}
 
 
 if __name__ == "__main__":

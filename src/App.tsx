@@ -3,8 +3,13 @@ import './index.css';
 import { SessionGate } from './components/SessionGate';
 import { CollabPanel } from './components/CollabPanel';
 import { ConflictModal } from './conflict-ui/ConflictModal';
+import type { ConflictData } from './conflict-ui/ConflictModal';
 import { CodeEditor } from './editor/CodeEditor';
-import { ResearchDashboard } from './research-dashboard/ResearchDashboard';
+import { OutputPanel } from './editor/OutputPanel';
+import type { RunResult, BottomPanelTab } from './editor/OutputPanel';
+import { useLiveConflictDetector } from './editor/useLiveConflictDetector';
+import { SnapshotsModal } from './components/SnapshotsModal';
+import { CommentsDrawer } from './components/CommentsDrawer';
 import {
   initCollaboration,
   getConnectedUsers,
@@ -12,20 +17,74 @@ import {
   getRecentChanges,
   recordChange,
   getLocalUser,
-  UserInfo,
-  destroy,
+  getYText,
+  getHostYText,
+  mergeDraftToHost,
+  syncDraftFromHost,
+  addActivityLog,
+  subscribeActivityLogs,
+  clearActivityLogs,
+  subscribeAwareness,
+  getPeerState,
+  getComments,
+  subscribeComments,
+  getHostFiles,
+  subscribeHostFiles,
+  addHostFile,
+  removeHostFile,
+  renameHostFile,
+  initHostFiles,
+  syncAllFilesFromHost,
+  createMergeProposal,
+  getMergeProposals,
+  subscribeMergeProposals,
+  resolveMergeProposal,
+  type UserInfo,
+  type ActivityLogItem,
+  type MergeProposal,
 } from './collaboration/store';
-import { diffSource, classifyChanges } from './api/client';
+import { diffSource, classifyChanges, runCode, formatCode, lintCode } from './api/client';
 
-type Tab = 'editor' | 'research';
-const FILES = ['main.py', 'utils.py', 'models.py'];
+// Default starter files
+const DEFAULT_FILES: Record<string, string> = {
+  'main.py': `def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+if __name__ == "__main__":
+    print(greet("World"))
+    print(add(3, 4))
+`,
+  'utils.py': `def clamp(val, lo, hi):
+    return max(lo, min(hi, val))
+
+def format_table(rows):
+    for row in rows:
+        print("\\t".join(str(c) for c in row))
+`,
+};
 
 function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [userId, setUserId]       = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>('editor');
+  const [currentUserName, setCurrentUserName] = useState<string>('');
+  const [isHost, setIsHost]       = useState<boolean>(true);
+
+  // ─── Dynamic file state ───────────────────────────────────────────────────
+  const [files, setFiles]           = useState<string[]>(['main.py', 'utils.py']);
   const [activeFile, setActiveFile] = useState('main.py');
-  const [users, setUsers]         = useState<UserInfo[]>([]);
+  const [fileContents, setFileContents] = useState<Record<string, string>>({ ...DEFAULT_FILES });
+  const prevContents = useRef<Record<string, string>>({ ...DEFAULT_FILES });
+
+  // ─── File rename dialog state ─────────────────────────────────────────────
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
+  const [renameInput, setRenameInput]   = useState<string>('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  // ─── Collab state ────────────────────────────────────────────────────────
+  const [users, setUsers]           = useState<UserInfo[]>([]);
   const [syncStatus, setSyncStatus] = useState<'connected'|'connecting'|'disconnected'>('disconnected');
   const [localChanges, setLocalChanges]   = useState(0);
   const [remoteChanges, setRemoteChanges] = useState(0);
@@ -34,12 +93,47 @@ function App() {
   const [mlPrediction, setMlPrediction] = useState('');
   const [mlConfidence, setMlConfidence] = useState(0);
   const [conflictCount, setConflictCount] = useState(0);
-  const [conflict, setConflict]     = useState<any>(null);
-  const [toasts, setToasts]         = useState<{id:number;msg:string;type:string}[]>([]);
-  const [fileContents, setFileContents] = useState<Record<string, string>>({});
-  const prevContents = useRef<Record<string, string>>({});
+
+  // ─── Merge / Conflict state ───────────────────────────────────────────────
+  const [conflictData, setConflictData] = useState<ConflictData | null>(null);
+  const [merging, setMerging]           = useState(false);
+
+  // ─── Run / output / activity log workbench state ─────────────────────────
+  const [outputOpen, setOutputOpen]         = useState(false);
+  const [bottomPanelTab, setBottomPanelTab] = useState<BottomPanelTab>('output');
+  const [running, setRunning]               = useState(false);
+  const [runResults, setRunResults]         = useState<RunResult[]>([]);
+  const [stdin, setStdin]                   = useState('');
+  const [activityLogs, setActivityLogs]     = useState<ActivityLogItem[]>([]);
+  const lastConflictLoggedRef               = useRef<string>('');
+
+  // ─── Visual Snapshots & Comments state ───────────────────────────────────
+  const [snapshotsOpen, setSnapshotsOpen]   = useState(false);
+  const [commentsOpen, setCommentsOpen]     = useState(false);
+  const [openCommentsCount, setOpenCommentsCount] = useState(0);
+
+  // ─── Peer Follow Mode & Navigation ────────────────────────────────────────
+  const [followingUserId, setFollowingUserId] = useState<string | null>(null);
+  const [targetLine, setTargetLine]           = useState<number | null>(null);
+  const [currentEditorLine, setCurrentEditorLine] = useState<number>(1);
+
+  // ─── Code Formatter & Diagnostics ─────────────────────────────────────────
+  const [formatting, setFormatting] = useState(false);
+  const [lintErrors, setLintErrors] = useState<Array<{ line: number; message: string }>>([]);
+
+  // ─── Merge Proposals & Project Files state ────────────────────────────────
+  const [pendingProposals, setPendingProposals] = useState<MergeProposal[]>([]);
+  const prevProposalStatusRef                   = useRef<Record<string, string>>({});
+
+  // ─── Misc ─────────────────────────────────────────────────────────────────
+  const [toasts, setToasts] = useState<{id:number;msg:string;type:string}[]>([]);
   const analyzeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastId = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [headerCopied, setHeaderCopied] = useState(false);
+
+  // ─── Live as-you-type conflict detector ──────────────────────────────────
+  const { liveConflict, localActiveNode, analyzeEdit } = useLiveConflictDetector();
 
   const toast = useCallback((msg: string, type = 'info') => {
     const id = ++toastId.current;
@@ -47,328 +141,1366 @@ function App() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4000);
   }, []);
 
-  // ─── Join/Create session ────────────────────────────────────────────────────
-  const handleJoined = useCallback((sid: string, uid: string) => {
+  // ─── Join session ─────────────────────────────────────────────────────────
+  const handleJoined = useCallback((sid: string, uid: string, uname: string, host: boolean) => {
     setSessionId(sid);
     setUserId(uid);
+    setCurrentUserName(uname);
+    setIsHost(host);
     try {
-      initCollaboration(sid, uid);
-      toast(`Joined session ${sid}`, 'success');
-    } catch (e) {
-      // Demo mode or server unavailable — proceed without CRDT
-      toast('Running in demo mode (no sync server)', 'info');
-    }
-  }, [toast]);
+      const { localUser } = initCollaboration(sid, uid, uname, host);
+      toast(`Joined workspace ${sid} as ${uname} (${host ? 'Host' : 'Collaborator'})`, 'success');
 
-  // ─── Poll presence & sync status ────────────────────────────────────────────
+      // Initialize or pull canonical project files
+      if (host) {
+        initHostFiles(files);
+        files.forEach((f) => {
+          const hostText = getHostYText(f);
+          if (hostText.length === 0 && fileContents[f]) {
+            hostText.insert(0, fileContents[f]);
+          }
+        });
+      } else {
+        const hostFiles = getHostFiles();
+        if (hostFiles.length > 0) {
+          setFiles(hostFiles);
+          const initialContents: Record<string, string> = {};
+          hostFiles.forEach((f) => {
+            const content = getHostYText(f).toString();
+            initialContents[f] = content;
+            prevContents.current[f] = content;
+          });
+          setFileContents((prev) => ({ ...prev, ...initialContents }));
+          setActiveFile(hostFiles[0]);
+        }
+      }
+
+      // Subscribe to merge proposals
+      subscribeMergeProposals((props) => {
+        setPendingProposals(props.filter((p) => p.status === 'pending'));
+        // Alert collaborator when their proposals are accepted or rejected
+        props.forEach((p) => {
+          if (p.fromUserId === uid) {
+            const prev = prevProposalStatusRef.current[p.id];
+            if (prev === 'pending' && p.status === 'accepted') {
+              toast(
+                p.isNewFile
+                  ? `✓ Host accepted and added "${p.file}" to the project!`
+                  : `✓ Host accepted your merge for "${p.file}"!`,
+                'success'
+              );
+            } else if (prev === 'pending' && p.status === 'rejected') {
+              toast(`Host declined merge for "${p.file}".`, 'info');
+            }
+            prevProposalStatusRef.current[p.id] = p.status;
+          }
+        });
+      });
+
+      // Subscribe to real-time activity and merge logs
+      subscribeActivityLogs((logs) => {
+        setActivityLogs([...logs]);
+      });
+
+      // Record presence join event
+      addActivityLog({
+        type: 'presence',
+        userId: uid,
+        userName: localUser.name,
+        userColor: localUser.color,
+        isHost: host,
+        action: `${localUser.name} joined workspace as ${host ? 'Host' : 'Collaborator'}`,
+      });
+    } catch {
+      toast('Operating in local mode', 'info');
+    }
+  }, [fileContents, files, toast]);
+
+  // Synchronize canonical host files for connected collaborators
+  useEffect(() => {
+    if (!sessionId || isHost) return;
+    const unsub = subscribeHostFiles((hostFiles) => {
+      if (hostFiles.length === 0) return;
+      setFiles((prev) => {
+        const newlyAdded = hostFiles.filter((f) => !prev.includes(f));
+        if (newlyAdded.length > 0) {
+          newlyAdded.forEach((f) => {
+            const content = getHostYText(f).toString();
+            setFileContents((fc) => ({ ...fc, [f]: content }));
+            prevContents.current[f] = content;
+          });
+          toast(`Host added new file(s) to project: ${newlyAdded.join(', ')}`, 'info');
+          return Array.from(new Set([...prev, ...hostFiles]));
+        }
+        return prev;
+      });
+    });
+    return unsub;
+  }, [isHost, sessionId, toast]);
+
+  // Log potential structural conflicts when detected
+  useEffect(() => {
+    if (liveConflict?.severity === 'conflict' && liveConflict.peerName && liveConflict.peerNode) {
+      const conflictKey = `${activeFile}:${localActiveNode?.name}:${liveConflict.peerName}:${liveConflict.peerNode}`;
+      if (lastConflictLoggedRef.current !== conflictKey) {
+        lastConflictLoggedRef.current = conflictKey;
+        const localUser = getLocalUser();
+        addActivityLog({
+          type: 'conflict',
+          userId: userId || 'local',
+          userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+          userColor: localUser?.color || '#ef4444',
+          isHost,
+          filename: activeFile,
+          action: `Potential AST collision on "${localActiveNode?.name || 'function'}" with ${liveConflict.peerName}`,
+          details: {
+            astChanges: [`Peer editing: ${liveConflict.peerNode}`],
+            target: localActiveNode?.name,
+          },
+        });
+      }
+    }
+  }, [activeFile, currentUserName, isHost, liveConflict, localActiveNode, userId]);
+
+  // ─── Poll presence ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!sessionId) return;
-    const interval = setInterval(() => {
+    const iv = setInterval(() => {
       setUsers(getConnectedUsers().filter(u => u.id !== userId));
       setSyncStatus(getSyncStatus());
     }, 1000);
-    return () => clearInterval(interval);
+    return () => clearInterval(iv);
   }, [sessionId, userId]);
 
-  // ─── Handle content changes from editor ─────────────────────────────────────
-  const handleContentChange = useCallback(
-    (content: string, file: string) => {
-      const prev = prevContents.current[file] ?? '';
-      if (content === prev) return;
-
-      prevContents.current[file] = content;
-      setFileContents((fc) => ({ ...fc, [file]: content }));
-      setLocalChanges((n) => n + 1);
-
-      // Record CRDT change record
-      recordChange(file, 'edit', content.slice(0, 40), 0, content.split('\n').length);
-
-      // Debounce AST diff + ML classify (1.5s after last keystroke)
-      if (analyzeTimerRef.current) clearTimeout(analyzeTimerRef.current);
-      analyzeTimerRef.current = setTimeout(async () => {
-        if (!prev || !content) return;
-        setAstStatus('parsing');
+  // ─── Import file(s) from disk ─────────────────────────────────────────────
+  const handleImportFiles = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files || []);
+    if (!picked.length) return;
+    let imported = 0;
+    picked.forEach((f) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const content = ev.target?.result as string;
+        setFiles((fs) => fs.includes(f.name) ? fs : [...fs, f.name]);
+        setFileContents((fc) => ({ ...fc, [f.name]: content }));
+        prevContents.current[f.name] = content;
         try {
-          const diffResult = await diffSource(prev, content, file);
-          setAstStatus('ready');
-
-          if (diffResult.success && diffResult.changes.length > 0) {
-            // Simulate a concurrent change from the "other user" for demo purposes
-            // In real use, this would come from another user's CRDT op
-            const recentRemote = getRecentChanges(2);
-            if (recentRemote.length >= 2) {
-              const changeA = diffResult.changes[0];
-              const changeB = {
-                ...diffResult.changes[0],
-                name: diffResult.changes[0].name || 'remote_change',
-              };
-              setMlStatus('classifying');
-              const result = await classifyChanges(changeA, changeB);
-              setMlStatus('ready');
-              setMlPrediction(result.prediction.prediction);
-              setMlConfidence(result.prediction.confidence);
-            }
+          const ytext = getYText(f.name);
+          if (ytext.toString() !== content) {
+            ytext.doc?.transact(() => {
+              ytext.delete(0, ytext.length);
+              ytext.insert(0, content);
+            });
           }
-        } catch {
-          setAstStatus('error');
+        } catch { /* collab not ready */ }
+        if (isHost) {
+          addHostFile(f.name);
         }
-      }, 1500);
-    },
-    [],
-  );
 
-  // ─── Demo scenarios ─────────────────────────────────────────────────────────
-  const handleRunDemo = useCallback(
-    async (scenario: 'compatible' | 'conflict') => {
-      if (scenario === 'compatible') {
-        const changeA = {
-          node_type: 'FunctionDef', name: 'calculate',
-          operation: 'modified', line_start: 2, line_end: 3, parent: 'Module',
-        };
-        const changeB = {
-          node_type: 'FunctionDef', name: 'validate',
-          operation: 'added', line_start: 6, line_end: 8, parent: 'Module',
-        };
-        setMlStatus('classifying');
-        try {
-          const result = await classifyChanges(changeA, changeB);
-          setMlStatus('ready');
-          setMlPrediction(result.prediction.prediction);
-          setMlConfidence(result.prediction.confidence);
-          setConflictCount(0);
-          toast(`Demo: ${result.prediction.prediction} (${(result.prediction.confidence * 100).toFixed(1)}%)`, 'success');
-        } catch {
-          toast('Python service unavailable for ML classification', 'error');
-          setMlPrediction('Compatible');
-          setMlConfidence(0.85);
-          setConflictCount(0);
-          setMlStatus('ready');
-        }
-      } else {
+        imported++;
+        if (imported === 1) setActiveFile(f.name);
+
         const localUser = getLocalUser();
-        const changeA = {
-          node_type: 'FunctionDef', name: 'calculate',
-          operation: 'modified', line_start: 2, line_end: 3, parent: 'Module',
-        };
-        const changeB = {
-          node_type: 'FunctionDef', name: 'calculate',
-          operation: 'modified', line_start: 2, line_end: 3, parent: 'Module',
-        };
-        setMlStatus('classifying');
+        addActivityLog({
+          type: 'file',
+          userId: userId || 'user',
+          userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+          userColor: localUser?.color || '#6c8eff',
+          isHost,
+          filename: f.name,
+          action: `Imported "${f.name}" from disk`,
+        });
+
+        if (imported === picked.length) {
+          toast(`Imported ${imported} file${imported > 1 ? 's' : ''}`, 'success');
+        }
+      };
+      reader.readAsText(f);
+    });
+    e.target.value = '';
+  }, [currentUserName, isHost, toast, userId]);
+
+  // ─── New blank file ───────────────────────────────────────────────────────
+  const handleNewFile = useCallback(() => {
+    const base = 'untitled';
+    let name = `${base}.py`;
+    let i = 1;
+    while (files.includes(name)) { name = `${base}${i++}.py`; }
+    setFiles((fs) => [...fs, name]);
+    setFileContents((fc) => ({ ...fc, [name]: '' }));
+    prevContents.current[name] = '';
+    setActiveFile(name);
+
+    if (isHost) {
+      addHostFile(name);
+      try {
+        const hostText = getHostYText(name);
+        if (hostText.length > 0) hostText.delete(0, hostText.length);
+      } catch { /* ignore */ }
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'file',
+      userId: userId || 'user',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename: name,
+      action: `Created new file "${name}"`,
+    });
+  }, [currentUserName, files, isHost, userId]);
+
+  // ─── File Renaming Dialog ─────────────────────────────────────────────────
+  const openRenameDialog = useCallback((file: string) => {
+    setRenameTarget(file);
+    setRenameInput(file);
+    setTimeout(() => {
+      if (renameInputRef.current) {
+        renameInputRef.current.focus();
+        renameInputRef.current.select();
+      }
+    }, 50);
+  }, []);
+
+  const closeRenameDialog = useCallback(() => {
+    setRenameTarget(null);
+    setRenameInput('');
+  }, []);
+
+  const executeRename = useCallback((oldName: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) {
+      closeRenameDialog();
+      return;
+    }
+    if (files.includes(trimmed)) {
+      toast(`A file named "${trimmed}" already exists.`, 'error');
+      return;
+    }
+
+    // 1. Update file list
+    setFiles((prev) => prev.map((f) => (f === oldName ? trimmed : f)));
+
+    // 2. Transfer content state
+    setFileContents((prev) => {
+      const copy = { ...prev };
+      copy[trimmed] = copy[oldName] ?? '';
+      delete copy[oldName];
+      return copy;
+    });
+
+    // 3. Transfer prevContents
+    if (prevContents.current[oldName] !== undefined) {
+      prevContents.current[trimmed] = prevContents.current[oldName];
+      delete prevContents.current[oldName];
+    }
+
+    // 4. Transfer Y.Text content
+    try {
+      const oldY = getYText(oldName);
+      const newY = getYText(trimmed);
+      const content = oldY.toString() || fileContents[oldName] || '';
+      if (content && newY.length === 0) {
+        newY.insert(0, content);
+      }
+    } catch { /* collab not ready */ }
+
+    if (isHost) {
+      renameHostFile(oldName, trimmed);
+    }
+
+    // 5. Update activeFile if current file was renamed
+    if (activeFile === oldName) {
+      setActiveFile(trimmed);
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'file',
+      userId: userId || 'user',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename: trimmed,
+      action: `Renamed "${oldName}" → "${trimmed}"`,
+      details: { oldName, newName: trimmed },
+    });
+
+    closeRenameDialog();
+    toast(`Renamed "${oldName}" to "${trimmed}"`, 'success');
+  }, [activeFile, closeRenameDialog, currentUserName, fileContents, files, isHost, toast, userId]);
+
+  // ─── Close file tab ───────────────────────────────────────────────────────
+  const handleCloseFile = useCallback((name: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setFiles((fs) => {
+      const next = fs.filter((f) => f !== name);
+      if (activeFile === name && next.length > 0) {
+        setActiveFile(next[Math.max(0, fs.indexOf(name) - 1)]);
+      }
+      return next;
+    });
+    setFileContents((fc) => {
+      const copy = { ...fc };
+      delete copy[name];
+      return copy;
+    });
+
+    if (isHost) {
+      removeHostFile(name);
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'file',
+      userId: userId || 'user',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename: name,
+      action: `Closed file "${name}"`,
+    });
+  }, [activeFile, currentUserName, isHost, userId]);
+
+  // ─── Save file to disk ────────────────────────────────────────────────────
+  const handleSaveFile = useCallback(() => {
+    const content = fileContents[activeFile] ?? '';
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = activeFile;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast(`Saved ${activeFile}`, 'success');
+  }, [activeFile, fileContents, toast]);
+
+  // ─── Run current file (Feature 1: Multi-file project sandbox) ───────────
+  const handleRun = useCallback(async () => {
+    const source = fileContents[activeFile];
+    if (!source?.trim()) {
+      toast('Nothing to run — file is empty.', 'info');
+      return;
+    }
+    if (!activeFile.endsWith('.py')) {
+      toast('Only Python files can be executed.', 'info');
+      return;
+    }
+    setOutputOpen(true);
+    setBottomPanelTab('output');
+    setRunning(true);
+    try {
+      // Pass all open files so cross-file imports like "import utils" work smoothly
+      const result = await runCode(source, activeFile, stdin, fileContents);
+      setRunResults((rs) => [...rs, { ...result, timestamp: Date.now() }]);
+    } catch {
+      setRunResults((rs) => [...rs, {
+        stdout: '',
+        stderr: 'Could not reach execution backend. Ensure the server is running.',
+        exit_code: -1,
+        elapsed: 0,
+        filename: activeFile,
+        timestamp: Date.now(),
+      }]);
+    } finally {
+      setRunning(false);
+    }
+  }, [activeFile, fileContents, stdin, toast]);
+
+  // ─── Code formatting (PEP 8) (Feature 6) ──────────────────────────────────
+  const handleFormat = useCallback(async () => {
+    const source = fileContents[activeFile];
+    if (!source?.trim() || !activeFile.endsWith('.py')) return;
+    setFormatting(true);
+    try {
+      const res = await formatCode(source);
+      if (res.formatted && res.formatted !== source) {
+        setFileContents((fc) => ({ ...fc, [activeFile]: res.formatted }));
+        prevContents.current[activeFile] = res.formatted;
         try {
-          const result = await classifyChanges(changeA, changeB);
-          setMlStatus('ready');
-          setMlPrediction(result.prediction.prediction);
-          setMlConfidence(result.prediction.confidence);
-          setConflictCount(1);
-          // Build conflict object for the modal
-          setConflict({
-            changeA: {
-              userId: localUser?.id ?? 'user-a',
-              userName: localUser?.name ?? 'Alice',
-              ...changeA,
-            },
-            changeB: {
-              userId: 'remote-user',
-              userName: 'Bob',
-              ...changeB,
-            },
-            features: result.features,
-            prediction: result.prediction,
+          const ytext = getYText(activeFile);
+          ytext.doc?.transact(() => {
+            ytext.delete(0, ytext.length);
+            ytext.insert(0, res.formatted);
           });
-        } catch {
-          // Fallback demo without ML
-          toast('Python service unavailable — showing demo conflict', 'info');
-          const fallbackPrediction = {
-            label: 1, confidence: 0.92,
-            prediction: 'Potential Conflict',
-            explanation: 'Both changes target the same FunctionDef node; both_modify=true, same_function=true',
-            feature_importances: { same_function: 0.42, both_modify: 0.31, op_combo_score: 0.18, line_overlap: 0.09 },
-          };
-          setMlPrediction(fallbackPrediction.prediction);
-          setMlConfidence(fallbackPrediction.confidence);
-          setConflictCount(1);
-          setConflict({
-            changeA: { userId: 'user-a', userName: 'Alice', ...changeA },
-            changeB: { userId: 'user-b', userName: 'Bob', ...changeB },
-            features: { same_function: 1, both_modify: 1, op_combo_score: 3, line_overlap: 1, same_name: 1 },
-            prediction: fallbackPrediction,
-          });
-          setMlStatus('ready');
+        } catch { /* ignore */ }
+        toast(`Formatted ${activeFile} (PEP 8)`, 'success');
+      } else {
+        toast(`${activeFile} is already well-formatted`, 'info');
+      }
+    } catch (err: any) {
+      toast(`Formatting error: ${err.message}`, 'error');
+    } finally {
+      setFormatting(false);
+    }
+  }, [activeFile, fileContents, toast]);
+
+  // ─── Restore Snapshot (Feature 3) ─────────────────────────────────────────
+  const handleRestoreSnapshot = useCallback((restoredFiles: Record<string, string>, snapName: string) => {
+    setFileContents((prev) => ({ ...prev, ...restoredFiles }));
+    setFiles((prev) => {
+      const combined = new Set([...prev, ...Object.keys(restoredFiles)]);
+      return Array.from(combined);
+    });
+    // Update CRDT text for each restored file
+    Object.entries(restoredFiles).forEach(([fname, content]) => {
+      try {
+        const ytext = getYText(fname);
+        ytext.doc?.transact(() => {
+          ytext.delete(0, ytext.length);
+          ytext.insert(0, content);
+        });
+      } catch { /* ignore */ }
+    });
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'sync',
+      userId: userId || 'local',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#38bdf8',
+      isHost,
+      action: `Restored project snapshot "${snapName}" (${Object.keys(restoredFiles).length} files)`,
+    });
+    toast(`Restored snapshot "${snapName}"`, 'success');
+  }, [currentUserName, isHost, toast, userId]);
+
+  // ─── Follow Mode Effect (Feature 2) ───────────────────────────────────────
+  useEffect(() => {
+    if (!followingUserId) return;
+    const unsub = subscribeAwareness(() => {
+      const peer = getPeerState(followingUserId);
+      if (peer) {
+        if (peer.activeFile && files.includes(peer.activeFile) && peer.activeFile !== activeFile) {
+          setActiveFile(peer.activeFile);
+        }
+        if (peer.activeLine) {
+          setTargetLine(peer.activeLine);
         }
       }
+    });
+    const initialPeer = getPeerState(followingUserId);
+    if (initialPeer) {
+      if (initialPeer.activeFile && files.includes(initialPeer.activeFile)) {
+        setActiveFile(initialPeer.activeFile);
+      }
+      if (initialPeer.activeLine) {
+        setTargetLine(initialPeer.activeLine);
+      }
+    }
+    return unsub;
+  }, [followingUserId, files, activeFile]);
+
+  // ─── Comments Count Effect (Feature 5) ────────────────────────────────────
+  useEffect(() => {
+    const updateCommentsCount = (all: any[]) => {
+      setOpenCommentsCount(all.filter((c) => !c.resolved).length);
+    };
+    updateCommentsCount(getComments());
+    return subscribeComments(updateCommentsCount);
+  }, []);
+
+  // Keyboard shortcut: Ctrl+Enter / Cmd+Enter to run, Ctrl+S / Cmd+S to save, Shift+Alt+F to format
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (!running) handleRun();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        handleSaveFile();
+      }
+      if (e.shiftKey && e.altKey && (e.key === 'F' || e.key === 'f')) {
+        e.preventDefault();
+        if (!formatting) handleFormat();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleRun, handleSaveFile, handleFormat, running, formatting]);
+
+  // ─── Content changes from editor ─────────────────────────────────────────
+  const handleContentChange = useCallback(
+    (content: string, file: string, cursorLine = 1) => {
+      setCurrentEditorLine(cursorLine);
+      const prev = prevContents.current[file] ?? '';
+      const changed = content !== prev;
+      if (changed) {
+        prevContents.current[file] = content;
+        setFileContents((fc) => ({ ...fc, [file]: content }));
+        setLocalChanges((n) => n + 1);
+        try {
+          recordChange(file, 'edit', content.slice(0, 40), 0, content.split('\n').length);
+        } catch { /* collab not ready */ }
+      }
+
+      analyzeEdit(content, file, cursorLine);
+
+      if (changed) {
+        if (analyzeTimerRef.current) clearTimeout(analyzeTimerRef.current);
+        analyzeTimerRef.current = setTimeout(async () => {
+          if (!prev || !content) return;
+          setAstStatus('parsing');
+          try {
+            const diffResult = await diffSource(prev, content, file);
+            setAstStatus('ready');
+            if (diffResult.success && diffResult.changes.length > 0) {
+              const recentRemote = getRecentChanges(2);
+              if (recentRemote.length >= 2) {
+                const changeA = diffResult.changes[0];
+                const changeB = { ...diffResult.changes[0], name: diffResult.changes[0].name || 'remote_change' };
+                setMlStatus('classifying');
+                const result = await classifyChanges(changeA, changeB);
+                setMlStatus('ready');
+                setMlPrediction(result.prediction.prediction);
+                setMlConfidence(result.prediction.confidence);
+              }
+            }
+          } catch {
+            setAstStatus('error');
+          }
+        }, 1500);
+      }
     },
-    [toast],
+    [analyzeEdit],
   );
 
-  // ─── Conflict resolution ─────────────────────────────────────────────────────
-  const resolveConflict = useCallback(
-    (how: 'a' | 'b' | 'both' | 'manual') => {
-      const msgs: Record<string, string> = {
-        a: 'Accepted User A\'s changes.',
-        b: 'Accepted User B\'s changes.',
-        both: 'Kept both changes (appended).',
-        manual: 'Marked for manual resolution — edit freely.',
-      };
-      setConflict(null);
-      setConflictCount(0);
-      setMlPrediction('Compatible');
-      toast(msgs[how], 'success');
-    },
-    [toast],
-  );
+  // ─── Merge to Host & Conflict Resolution Workflow ─────────────────────────
+  const handleMergeToHost = useCallback(async () => {
+    const hostFiles = getHostFiles();
+    const collaborator = currentUserName || 'Collaborator';
+    const localUser = getLocalUser();
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
-  if (!sessionId) {
-    return <SessionGate onJoined={handleJoined} />;
-  }
+    // 1. Synchronize any newly created Host files to this collaborator
+    const missingHostFiles = hostFiles.filter((f) => !files.includes(f));
+    if (missingHostFiles.length > 0) {
+      missingHostFiles.forEach((f) => {
+        const content = getHostYText(f).toString();
+        setFiles((prev) => (prev.includes(f) ? prev : [...prev, f]));
+        setFileContents((fc) => ({ ...fc, [f]: content }));
+        prevContents.current[f] = content;
+      });
+      toast(`Received ${missingHostFiles.length} file(s) from Host: ${missingHostFiles.join(', ')}`, 'info');
+    }
+
+    // 2. Identify all local files created by this collaborator not yet present on Host
+    const unmergedNewFiles = files.filter((f) => !hostFiles.includes(f));
+    let proposedNewCount = 0;
+
+    unmergedNewFiles.forEach((newFile) => {
+      const content = fileContents[newFile] ?? '';
+      createMergeProposal(newFile, content, '', true);
+      addActivityLog({
+        type: 'merge',
+        userId: userId || 'collab',
+        userName: collaborator,
+        userColor: localUser?.color || '#4ade80',
+        isHost,
+        filename: newFile,
+        action: `${collaborator} proposed new file "${newFile}" to merge into Host workspace`,
+        details: {
+          resolution: 'review_opened',
+          previewSnippet: content.slice(0, 350),
+          linesAdded: content.split('\n').length,
+        },
+      });
+      proposedNewCount++;
+    });
+
+    // 3. Propose changes to activeFile if it's an existing host file with local edits
+    const currentContent = fileContents[activeFile] ?? '';
+    if (hostFiles.includes(activeFile)) {
+      let hostContent = '';
+      try {
+        hostContent = getHostYText(activeFile).toString();
+      } catch {
+        hostContent = currentContent;
+      }
+
+      if (currentContent !== hostContent) {
+        setMerging(true);
+        try {
+          createMergeProposal(activeFile, currentContent, hostContent, false);
+          const diff = await diffSource(hostContent, currentContent, activeFile);
+          addActivityLog({
+            type: 'merge',
+            userId: userId || 'collab',
+            userName: collaborator,
+            userColor: localUser?.color || '#4ade80',
+            isHost,
+            filename: activeFile,
+            action: `${collaborator} proposed merge for "${activeFile}"`,
+            details: {
+              resolution: 'review_opened',
+              astChanges: diff.changes?.map((c) => `${c.operation}: ${c.name || 'code'}`) || [],
+              previewSnippet: currentContent.slice(0, 350),
+              linesAdded: currentContent.split('\n').length,
+            },
+          });
+          if (proposedNewCount > 0) {
+            toast(
+              `Submitted ${proposedNewCount} new file(s) and merge request for "${activeFile}" to Host!`,
+              'success',
+            );
+          } else {
+            toast(`Submitted merge request for "${activeFile}" to Host!`, 'success');
+          }
+        } catch {
+          toast('Failed to propose merge for active file.', 'error');
+        } finally {
+          setMerging(false);
+        }
+        return;
+      }
+    }
+
+    if (proposedNewCount > 0) {
+      toast(
+        `Submitted ${proposedNewCount} new file(s) (${unmergedNewFiles.join(', ')}) to Host for merge review!`,
+        'success',
+      );
+      return;
+    }
+
+    if (missingHostFiles.length === 0) {
+      toast(`Your workspace is already in sync with the Host.`, 'info');
+    }
+  }, [activeFile, currentUserName, fileContents, files, isHost, toast, userId]);
+
+  // Host: Review incoming merge proposals & new files from collaborators
+  const handleReviewMerges = useCallback(async () => {
+    const pending = pendingProposals.filter((p) => p.status === 'pending');
+    if (pending.length === 0) {
+      toast('No pending merge proposals from collaborators.', 'info');
+      return;
+    }
+
+    const prop = pending[0];
+    setMerging(true);
+    try {
+      if (prop.isNewFile) {
+        setConflictData({
+          proposalId: prop.id,
+          isNewFile: true,
+          filename: prop.file,
+          hostName: currentUserName || 'Host',
+          collaboratorName: prop.fromUserName,
+          hostContent: '',
+          collaboratorContent: prop.draftContent,
+          changes: [],
+        });
+      } else {
+        const hostContent = getHostYText(prop.file).toString();
+        const diff = await diffSource(hostContent, prop.draftContent, prop.file);
+        let prediction: any = undefined;
+
+        if (diff.success && diff.changes && diff.changes.length > 0) {
+          const changeIncoming = diff.changes[0];
+          const changeHost = { ...changeIncoming, name: changeIncoming.name || 'host_version', operation: 'baseline' };
+          try {
+            const mlRes = await classifyChanges(changeIncoming, changeHost);
+            prediction = mlRes.prediction;
+          } catch {
+            prediction = {
+              label: 0,
+              confidence: 0.92,
+              prediction: 'Compatible',
+              explanation: 'Clean merge detected — no overlapping structural collision with host.',
+            };
+          }
+        }
+
+        setConflictData({
+          proposalId: prop.id,
+          isNewFile: false,
+          filename: prop.file,
+          hostName: currentUserName || 'Host',
+          collaboratorName: prop.fromUserName,
+          hostContent,
+          collaboratorContent: prop.draftContent,
+          changes: diff.changes || [],
+          prediction,
+        });
+      }
+    } catch {
+      toast('Failed to analyze merge proposal.', 'error');
+    } finally {
+      setMerging(false);
+    }
+  }, [currentUserName, pendingProposals, toast]);
+
+  // Pull host changes into collaborator draft (including newly created files)
+  const handleSyncFromHost = useCallback(() => {
+    try {
+      const { files: hostFiles, contents } = syncAllFilesFromHost(userId || '');
+      if (hostFiles.length === 0) {
+        toast('No files found on Host to sync.', 'info');
+        return;
+      }
+
+      const newlyAdded = hostFiles.filter((f) => !files.includes(f));
+      setFiles((prev) => Array.from(new Set([...prev, ...hostFiles])));
+      setFileContents((prev) => ({ ...prev, ...contents }));
+      Object.entries(contents).forEach(([f, c]) => {
+        prevContents.current[f] = c;
+      });
+
+      const localUser = getLocalUser();
+      addActivityLog({
+        type: 'sync',
+        userId: userId || 'collab',
+        userName: currentUserName || 'Collaborator',
+        userColor: localUser?.color || '#4ade80',
+        isHost: false,
+        action: newlyAdded.length > 0
+          ? `${currentUserName || 'Collaborator'} synced with Host, received ${newlyAdded.length} new file(s): ${newlyAdded.join(', ')}`
+          : `${currentUserName || 'Collaborator'} pulled latest Host workspace (${hostFiles.length} files)`,
+      });
+
+      if (newlyAdded.length > 0) {
+        toast(`Synced from Host! Received ${newlyAdded.length} new file(s): ${newlyAdded.join(', ')}`, 'success');
+      } else {
+        toast(`Synchronized all ${hostFiles.length} files from Host`, 'success');
+      }
+    } catch {
+      toast('Could not sync from host.', 'error');
+    }
+  }, [currentUserName, files, toast, userId]);
+
+  // Conflict Modal Handlers
+  const handleAcceptCollaboratorMerge = useCallback(() => {
+    if (!conflictData) return;
+    const { filename, collaboratorContent, collaboratorName, proposalId, isNewFile } = conflictData;
+
+    if (proposalId) {
+      resolveMergeProposal(proposalId, 'accepted', collaboratorContent);
+    } else {
+      mergeDraftToHost(filename, collaboratorContent);
+    }
+
+    if (isNewFile || !files.includes(filename)) {
+      setFiles((fs) => fs.includes(filename) ? fs : [...fs, filename]);
+      addHostFile(filename);
+      setActiveFile(filename);
+    }
+
+    setFileContents((prev) => ({ ...prev, [filename]: collaboratorContent }));
+    prevContents.current[filename] = collaboratorContent;
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'merge',
+      userId: userId || 'host',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename,
+      action: isNewFile
+        ? `Merged new file "${filename}" from ${collaboratorName} into project workspace`
+        : `Merged ${collaboratorName}'s changes into "${filename}" (Accepted incoming)`,
+      details: {
+        resolution: 'accepted',
+        astChanges: conflictData.changes?.map((c) => `${c.operation}: ${c.name || 'code'}`),
+        previewSnippet: collaboratorContent.slice(0, 350),
+      },
+    });
+
+    setConflictData(null);
+    setConflictCount(0);
+    toast(
+      isNewFile
+        ? `✓ Successfully added new file "${filename}" from ${collaboratorName} into project!`
+        : `✓ Successfully merged ${collaboratorName}'s changes into ${filename}!`,
+      'success'
+    );
+  }, [conflictData, currentUserName, files, isHost, toast, userId]);
+
+  const handleKeepHostMerge = useCallback(() => {
+    if (!conflictData) return;
+    const { filename, collaboratorName, proposalId, isNewFile } = conflictData;
+    if (proposalId) {
+      resolveMergeProposal(proposalId, 'rejected');
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'merge',
+      userId: userId || 'host',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename,
+      action: isNewFile
+        ? `Declined new file "${filename}" from ${collaboratorName}`
+        : `Kept Host version for "${filename}" (Rejected incoming changes from ${collaboratorName})`,
+      details: {
+        resolution: 'kept_host',
+      },
+    });
+
+    setConflictData(null);
+    toast(isNewFile ? `Declined new file "${filename}".` : `Kept Host version for "${filename}".`, 'info');
+  }, [conflictData, currentUserName, isHost, toast, userId]);
+
+  const handleMergeBothVersions = useCallback(() => {
+    if (!conflictData) return;
+    const { filename, hostContent, collaboratorContent, collaboratorName, proposalId, isNewFile } = conflictData;
+    const combined = isNewFile
+      ? collaboratorContent
+      : hostContent.trim() + '\n\n# --- Merged collaborator changes ---\n' + collaboratorContent.trim() + '\n';
+
+    if (proposalId) {
+      resolveMergeProposal(proposalId, 'accepted', combined);
+    } else {
+      mergeDraftToHost(filename, combined);
+    }
+
+    if (isNewFile || !files.includes(filename)) {
+      setFiles((fs) => (fs.includes(filename) ? fs : [...fs, filename]));
+      addHostFile(filename);
+      setActiveFile(filename);
+    }
+
+    if (isHost) {
+      setFileContents((prev) => ({ ...prev, [filename]: combined }));
+      prevContents.current[filename] = combined;
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'merge',
+      userId: userId || 'host',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename,
+      action: isNewFile
+        ? `Merged new file "${filename}" from ${collaboratorName} into project workspace`
+        : `Combined both Host and ${collaboratorName}'s changes in "${filename}"`,
+      details: {
+        resolution: 'merged_both',
+        previewSnippet: combined.slice(0, 350),
+      },
+    });
+
+    setConflictData(null);
+    setConflictCount(0);
+    toast(
+      isNewFile
+        ? `✓ Added new file "${filename}" from ${collaboratorName} into project!`
+        : `✓ Combined both versions into ${filename} (Host version)!`,
+      'success',
+    );
+  }, [conflictData, currentUserName, files, isHost, toast, userId]);
+
+  const handleCustomMerge = useCallback((customCode: string) => {
+    if (!conflictData) return;
+    const { filename, proposalId, isNewFile, collaboratorName } = conflictData;
+
+    if (proposalId) {
+      resolveMergeProposal(proposalId, 'accepted', customCode);
+    } else {
+      mergeDraftToHost(filename, customCode);
+    }
+
+    if (isNewFile || !files.includes(filename)) {
+      setFiles((fs) => (fs.includes(filename) ? fs : [...fs, filename]));
+      addHostFile(filename);
+      setActiveFile(filename);
+    }
+
+    if (isHost) {
+      setFileContents((prev) => ({ ...prev, [filename]: customCode }));
+      prevContents.current[filename] = customCode;
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'merge',
+      userId: userId || 'host',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename,
+      action: isNewFile
+        ? `Merged new file "${filename}" from ${collaboratorName} with custom edits into project`
+        : `Applied custom merge resolution into "${filename}"`,
+      details: {
+        resolution: 'custom',
+        previewSnippet: customCode.slice(0, 350),
+      },
+    });
+
+    setConflictData(null);
+    setConflictCount(0);
+    toast(
+      isNewFile
+        ? `✓ Successfully added new file "${filename}" into project workspace!`
+        : `✓ Custom merge committed into ${filename} (Host version)!`,
+      'success',
+    );
+  }, [conflictData, currentUserName, files, isHost, toast, userId]);
+
+  // ─── Render ───────────────────────────────────────────────────────────────
+  if (!sessionId) return <SessionGate onJoined={handleJoined} />;
 
   const localUser = getLocalUser();
 
+  const handleCopyWorkspace = () => {
+    if (sessionId) {
+      navigator.clipboard.writeText(sessionId);
+      setHeaderCopied(true);
+      setTimeout(() => setHeaderCopied(false), 1500);
+      toast('Workspace ID copied to clipboard', 'info');
+    }
+  };
+
   return (
     <div className="app-shell">
-      {/* Header */}
+      {/* Hidden file picker for import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".py,.txt,.md,.json,.js,.ts,.css,.html"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleImportFiles}
+      />
+
+      {/* Title bar */}
       <header className="app-header">
         <div className="logo">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/>
           </svg>
           Weaver
         </div>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)', paddingLeft: 8 }}>
-          ML-Assisted AST-Aware CRDT Collaborative Editor
-        </span>
 
         <div className="header-sep" />
 
-        <div className="header-tabs">
-          <div
-            className={`header-tab ${activeTab === 'editor' ? 'active' : ''}`}
-            onClick={() => setActiveTab('editor')}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
+          <span>Workspace:</span>
+          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', fontWeight: 600 }}>
+            {sessionId}
+          </span>
+          <button
+            className="session-copy-btn"
+            title="Copy Workspace ID"
+            onClick={handleCopyWorkspace}
           >
-            Editor
-          </div>
-          <div
-            className={`header-tab ${activeTab === 'research' ? 'active' : ''}`}
-            onClick={() => setActiveTab('research')}
-          >
-            Research Evaluation
-          </div>
-        </div>
+            {headerCopied ? '✓ Copied' : 'Copy'}
+          </button>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span
-            className={`status-dot ${syncStatus === 'connected' ? 'green' : syncStatus === 'connecting' ? 'yellow pulse' : 'grey'}`}
-          />
-          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-            {syncStatus === 'connected' ? 'Synced' : syncStatus === 'connecting' ? 'Connecting' : 'Offline'}
+          <span style={{ marginLeft: 6 }}>
+            {isHost ? (
+              <span className="version-badge host">👑 Host (Main)</span>
+            ) : (
+              <span className="version-badge branch">🌿 Working Copy</span>
+            )}
           </span>
         </div>
       </header>
 
-      {/* Body */}
-      {activeTab === 'editor' ? (
-        <div className="workspace">
-          {/* Sidebar */}
-          <aside className="sidebar">
-            <div className="sidebar-section">
-              <div className="sidebar-label">Explorer</div>
-              {FILES.map((f) => (
-                <div
-                  key={f}
-                  className={`file-item ${activeFile === f ? 'active' : ''}`}
-                  onClick={() => setActiveFile(f)}
-                >
-                  <span className="file-dot" />
-                  {f}
-                </div>
-              ))}
+      {/* Body: Full Editor Workspace */}
+      <div className="workspace">
+        {/* Sidebar / Explorer */}
+        <aside className="sidebar">
+          <div className="sidebar-section">
+            <div className="sidebar-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 4 }}>
+              <span>Explorer</span>
+              <div style={{ display: 'flex', gap: 2 }}>
+                <button
+                  className="sidebar-icon-btn"
+                  title="New file"
+                  onClick={handleNewFile}
+                >+</button>
+                <button
+                  className="sidebar-icon-btn"
+                  title="Import file(s) from disk"
+                  onClick={() => fileInputRef.current?.click()}
+                >↑</button>
+              </div>
             </div>
 
-            <div className="sidebar-footer">
-              {sessionId && (
-                <div className="session-badge">
-                  <div className="session-label">Session ID</div>
-                  <div className="session-id">{sessionId}</div>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                    {(users.length + 1)} user{users.length !== 0 ? 's' : ''} connected
-                  </div>
+            {files.map((f) => (
+              <div
+                key={f}
+                className={`file-item ${activeFile === f ? 'active' : ''}`}
+                onClick={() => setActiveFile(f)}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  openRenameDialog(f);
+                }}
+              >
+                <span className="file-dot" />
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {f}
+                </span>
+                <button
+                  className="file-rename-btn"
+                  title="Rename file (or double-click)"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openRenameDialog(f);
+                  }}
+                >✎</button>
+                {files.length > 1 && (
+                  <button
+                    className="file-close-btn"
+                    title="Close file"
+                    onClick={(e) => handleCloseFile(f, e)}
+                  >×</button>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <div className="sidebar-footer">
+            {sessionId && (
+              <div className="session-badge">
+                <div className="session-label">Workspace</div>
+                <div className="session-id">{sessionId}</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                  {users.length + 1} active collaborator{users.length !== 0 ? 's' : ''}
                 </div>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* Editor + Output */}
+        <main className="editor-area">
+          {/* Tab strip + run / merge controls */}
+          <div className="editor-toolbar">
+            {files.map((f) => (
+              <div
+                key={f}
+                className={`file-tab ${activeFile === f ? 'active' : ''}`}
+                onClick={() => setActiveFile(f)}
+                onDoubleClick={() => openRenameDialog(f)}
+                title="Double click to rename"
+              >
+                <span className="dot" />
+                {f}
+                {files.length > 1 && (
+                  <span
+                    className="tab-close"
+                    title="Close tab"
+                    onClick={(e) => handleCloseFile(f, e)}
+                  >×</span>
+                )}
+              </div>
+            ))}
+            <div style={{ flex: 1 }} />
+
+            {/* Editor actions: Format, Snapshots, Comments, REPL, Open, Save, Merge/Sync, Run */}
+            <div className="editor-actions" style={{ gap: 6, flexWrap: 'wrap' }}>
+              <button
+                className="editor-action-btn"
+                title="Format active Python file with PEP 8 (⇧⌥F)"
+                onClick={handleFormat}
+                disabled={formatting || !activeFile.endsWith('.py')}
+              >
+                {formatting ? 'Formatting…' : '⚡ Format'}
+              </button>
+
+              <button
+                className={`editor-action-btn ${commentsOpen ? 'active' : ''}`}
+                title="Inline Code Annotations & Review Comments"
+                onClick={() => setCommentsOpen(!commentsOpen)}
+              >
+                💬 Comments
+                {openCommentsCount > 0 && (
+                  <span className="btn-counter-badge accent">{openCommentsCount}</span>
+                )}
+              </button>
+
+              <button
+                className="editor-action-btn"
+                title="Project Snapshots & Time Travel"
+                onClick={() => setSnapshotsOpen(true)}
+              >
+                ⏱ Snapshots
+              </button>
+
+              <button
+                className={`editor-action-btn ${outputOpen && bottomPanelTab === 'repl' ? 'active' : ''}`}
+                title="Interactive Python Console (REPL)"
+                onClick={() => {
+                  if (outputOpen && bottomPanelTab === 'repl') {
+                    setOutputOpen(false);
+                  } else {
+                    setOutputOpen(true);
+                    setBottomPanelTab('repl');
+                  }
+                }}
+              >
+                &gt;&gt;&gt; REPL
+              </button>
+
+              {!isHost && (
+                <>
+                  <button
+                    className="sync-host-btn"
+                    title="Pull latest code from Host into your working copy"
+                    onClick={handleSyncFromHost}
+                  >
+                    ↻ Sync Host
+                  </button>
+                  <button
+                    className="merge-to-host-btn"
+                    title="Propose merge of working copy into Host version"
+                    onClick={handleMergeToHost}
+                    disabled={merging}
+                  >
+                    {merging ? 'Analyzing…' : '🌿 Merge to Host'}
+                  </button>
+                </>
               )}
-            </div>
-          </aside>
 
-          {/* Editor */}
-          <main className="editor-area">
-            <div className="editor-toolbar">
-              {FILES.map((f) => (
-                <div
-                  key={f}
-                  className={`file-tab ${activeFile === f ? 'active' : ''}`}
-                  onClick={() => setActiveFile(f)}
+              {isHost && (
+                <button
+                  className="sync-host-btn"
+                  title="Review incoming collaborator merge requests and new files"
+                  onClick={handleReviewMerges}
+                  disabled={merging}
                 >
-                  <span className="dot" />
-                  {f}
-                </div>
-              ))}
+                  Review Merges
+                  {pendingProposals.filter((p) => p.status === 'pending').length > 0 && (
+                    <span className="btn-counter-badge accent" style={{ marginLeft: 5 }}>
+                      {pendingProposals.filter((p) => p.status === 'pending').length}
+                    </span>
+                  )}
+                </button>
+              )}
+
+              <button
+                className={`activity-log-toggle-btn ${outputOpen && bottomPanelTab === 'logs' ? 'active' : ''}`}
+                title="View collaborator merges, file operations, and workspace activity log"
+                onClick={() => {
+                  if (outputOpen && bottomPanelTab === 'logs') {
+                    setOutputOpen(false);
+                  } else {
+                    setOutputOpen(true);
+                    setBottomPanelTab('logs');
+                  }
+                }}
+              >
+                📜 Logs {activityLogs.length > 0 && <span className="btn-counter-badge">{activityLogs.length}</span>}
+              </button>
+
+              <button
+                className="editor-action-btn"
+                title="Import file(s) from disk"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                Open
+              </button>
+              <button
+                className="editor-action-btn"
+                title="Save file to disk  (⌘S)"
+                onClick={handleSaveFile}
+              >
+                Save
+              </button>
+              <button
+                className={`editor-run-btn ${running ? 'running' : ''}`}
+                disabled={running || !activeFile.endsWith('.py')}
+                onClick={handleRun}
+                title="Run Python script (Multi-file enabled)  (⌘↵)"
+              >
+                {running ? (
+                  <><span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} /> Running</>
+                ) : (
+                  '▶ Run'
+                )}
+              </button>
             </div>
-            {FILES.map((f) => (
-              <div key={f} style={{ display: f === activeFile ? 'flex' : 'none', flex: 1, overflow: 'hidden' }}>
+          </div>
+
+          {/* Editor panes */}
+          <div className="editor-files-wrap">
+            {files.map((f) => (
+              <div
+                key={f}
+                style={{ display: f === activeFile ? 'flex' : 'none', flex: 1, overflow: 'hidden', flexDirection: 'column' }}
+              >
                 <CodeEditor
                   file={f}
-                  onContentChange={(content) => handleContentChange(content, f)}
+                  initialContent={fileContents[f]}
+                  onContentChange={(content, cursorLine) => handleContentChange(content, f, cursorLine)}
+                  liveConflict={f === activeFile ? liveConflict : undefined}
+                  localNodeName={f === activeFile ? localActiveNode?.name : undefined}
+                  localNodeLine={f === activeFile ? localActiveNode?.line_start : undefined}
+                  onReviewConflict={handleMergeToHost}
+                  targetLine={f === activeFile ? targetLine : undefined}
                 />
               </div>
             ))}
-          </main>
+          </div>
 
-          {/* Right Panel */}
-          <CollabPanel
-            users={users}
-            localUser={localUser}
-            sessionId={sessionId}
-            localChanges={localChanges}
-            remoteChanges={remoteChanges}
-            astStatus={astStatus}
-            mlStatus={mlStatus}
-            mlPrediction={mlPrediction}
-            mlConfidence={mlConfidence}
-            conflictCount={conflictCount}
-            syncStatus={syncStatus}
-            onShowConflict={() => conflict && setConflict(conflict)}
-            onRunDemo={handleRunDemo}
-          />
-        </div>
-      ) : (
-        <div className="workspace" style={{ overflow: 'hidden' }}>
-          <ResearchDashboard />
-        </div>
-      )}
+          {/* Output / REPL / Activity Log workbench panel (collapsible bottom) */}
+          {outputOpen && (
+            <OutputPanel
+              results={runResults}
+              running={running}
+              onClear={() => setRunResults([])}
+              onClose={() => setOutputOpen(false)}
+              stdin={stdin}
+              onStdinChange={setStdin}
+              activeTab={bottomPanelTab}
+              onTabChange={setBottomPanelTab}
+              activityLogs={activityLogs}
+              isHost={isHost}
+              onClearLogs={clearActivityLogs}
+              onSelectFile={setActiveFile}
+              sessionId={sessionId || undefined}
+            />
+          )}
+        </main>
 
-      {/* Conflict Modal */}
-      {conflict && (
-        <ConflictModal
-          conflict={conflict}
-          onAcceptA={() => resolveConflict('a')}
-          onAcceptB={() => resolveConflict('b')}
-          onKeepBoth={() => resolveConflict('both')}
-          onManual={() => resolveConflict('manual')}
-          onClose={() => setConflict(null)}
+        {/* Right panel */}
+        <CollabPanel
+          users={users}
+          localUser={localUser}
+          sessionId={sessionId}
+          localChanges={localChanges}
+          remoteChanges={remoteChanges}
+          astStatus={astStatus}
+          mlStatus={mlStatus}
+          mlPrediction={mlPrediction}
+          mlConfidence={mlConfidence}
+          conflictCount={conflictCount}
+          syncStatus={syncStatus}
+          liveConflict={liveConflict}
+          localActiveNode={localActiveNode}
+          onShowConflict={handleMergeToHost}
+          activityLogs={activityLogs}
+          onOpenLogs={() => {
+            setOutputOpen(true);
+            setBottomPanelTab('logs');
+          }}
+          followingUserId={followingUserId}
+          onFollowUser={setFollowingUserId}
+        />
+      </div>
+
+      {/* Snapshots Modal Dialog (Feature 3) */}
+      {snapshotsOpen && (
+        <SnapshotsModal
+          currentFiles={fileContents}
+          onRestore={handleRestoreSnapshot}
+          onClose={() => setSnapshotsOpen(false)}
         />
       )}
+
+      {/* Review Comments Drawer (Feature 5) */}
+      {commentsOpen && (
+        <CommentsDrawer
+          activeFile={activeFile}
+          currentLine={currentEditorLine}
+          onJumpToLine={(line) => setTargetLine(line)}
+          onClose={() => setCommentsOpen(false)}
+        />
+      )}
+
+      {/* Rename File Modal Dialog */}
+      {renameTarget && (
+        <div className="rename-modal-overlay" onClick={(e) => e.target === e.currentTarget && closeRenameDialog()}>
+          <div className="rename-modal-card">
+            <div className="rename-modal-header">
+              <h3>Rename File</h3>
+              <button
+                onClick={closeRenameDialog}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: 16, cursor: 'pointer', lineHeight: 1 }}
+              >✕</button>
+            </div>
+            <div className="rename-modal-body">
+              <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                Enter new name for <strong>{renameTarget}</strong>:
+              </label>
+              <input
+                ref={renameInputRef}
+                className="rename-modal-input"
+                value={renameInput}
+                onChange={(e) => setRenameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') executeRename(renameTarget, renameInput);
+                  if (e.key === 'Escape') closeRenameDialog();
+                }}
+              />
+            </div>
+            <div className="rename-modal-footer">
+              <button className="btn btn-secondary btn-sm" onClick={closeRenameDialog}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => executeRename(renameTarget, renameInput)}
+                disabled={!renameInput.trim() || renameInput.trim() === renameTarget}
+              >
+                Rename
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Review & Resolve Merge / Conflict Modal */}
+      {conflictData && (
+        <ConflictModal
+          conflict={conflictData}
+          onAcceptCollaborator={handleAcceptCollaboratorMerge}
+          onKeepHost={handleKeepHostMerge}
+          onMergeBoth={handleMergeBothVersions}
+          onCustomMerge={handleCustomMerge}
+          onClose={() => setConflictData(null)}
+        />
+      )}
+
+      {/* Status bar */}
+      <div className="statusbar">
+        <div className="statusbar-item" style={{ gap: 5 }}>
+          <span className={`status-dot ${syncStatus === 'connected' ? 'green' : syncStatus === 'connecting' ? 'yellow pulse' : 'grey'}`} />
+          {syncStatus === 'connected' ? 'Synced' : syncStatus === 'connecting' ? 'Connecting…' : 'Offline'}
+        </div>
+        {localUser && (
+          <div className="statusbar-item">
+            {localUser.name} {isHost ? '(Host)' : '(Collaborator)'}
+          </div>
+        )}
+        <div className="statusbar-sep" />
+        <div className="statusbar-item" style={{ cursor: 'pointer' }} onClick={() => setOutputOpen(o => !o)}>
+          {running ? '● Running' : runResults.length > 0 ? `✓ ${runResults[runResults.length-1].exit_code === 0 ? 'OK' : `Exit ${runResults[runResults.length-1].exit_code}`}` : 'Output'}
+        </div>
+        <div
+          className="statusbar-item"
+          style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}
+          onClick={() => {
+            if (outputOpen && bottomPanelTab === 'logs') {
+              setOutputOpen(false);
+            } else {
+              setOutputOpen(true);
+              setBottomPanelTab('logs');
+            }
+          }}
+          title="Toggle collaborator merges and activity logs"
+        >
+          📜 Collab Logs ({activityLogs.length})
+        </div>
+        <div className="statusbar-item">
+          {activeFile} · Python
+        </div>
+        <div className="statusbar-item" style={{ color: 'rgba(255,255,255,0.6)', fontSize: 10 }}>
+          ⌘↵ Run · ⌘S Save · Double-click to rename
+        </div>
+      </div>
 
       {/* Toasts */}
       <div className="toast-container">
         {toasts.map((t) => (
-          <div key={t.id} className={`toast ${t.type}`}>
-            <span style={{
-              color: t.type === 'success' ? 'var(--green)' : t.type === 'error' ? 'var(--red)' : 'var(--accent)',
-              fontSize: 14,
-            }}>
-              {t.type === 'success' ? '✓' : t.type === 'error' ? '✕' : 'ℹ'}
-            </span>
-            {t.msg}
-          </div>
+          <div key={t.id} className={`toast ${t.type}`}>{t.msg}</div>
         ))}
       </div>
     </div>

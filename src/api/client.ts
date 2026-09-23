@@ -21,6 +21,8 @@ export const createSession = () => call('POST', '/sessions');
 export const getSession = (id: string) => call('GET', `/sessions/${id}`);
 export const getFile = (sessionId: string, file: string) =>
   call('GET', `/sessions/${sessionId}/files/${file}`);
+export const saveFile = (sessionId: string, file: string, content: string) =>
+  call('PUT', `/sessions/${sessionId}/files/${file}`, { content });
 
 // ─── AST / ML API ─────────────────────────────────────────────────────────────
 export const parseSource = (source: string, file = 'main.py') =>
@@ -35,6 +37,23 @@ export const analyzeChanges = (changeA: unknown, changeB: unknown) =>
 export const classifyChanges = (changeA: unknown, changeB: unknown) =>
   call('POST', '/api/classify', { change_a: changeA, change_b: changeB });
 
+// ─── Code Execution & Tooling ─────────────────────────────────────────────────
+export const runCode = (
+  source: string,
+  filename = 'script.py',
+  stdin = '',
+  all_files?: Record<string, string>,
+) => call('POST', '/api/run', { source, filename, stdin, all_files });
+
+export const runRepl = (code: string, sessionId?: string) =>
+  call('POST', '/api/repl', { code, session_id: sessionId });
+
+export const formatCode = (source: string) =>
+  call('POST', '/api/format', { source });
+
+export const lintCode = (source: string, filename = 'script.py') =>
+  call('POST', '/api/lint', { source, filename });
+
 // ─── ML Training / Evaluation ─────────────────────────────────────────────────
 export const trainModel = (algorithm = 'random_forest', nSamples = 800) =>
   call('POST', '/api/train', { algorithm, n_samples: nSamples });
@@ -48,3 +67,4 @@ export const getDatasetStats = () => call('GET', '/api/dataset/stats');
 // ─── Demo Scenarios ───────────────────────────────────────────────────────────
 export const runDemoScenario = (scenario: 'compatible' | 'conflict') =>
   call('POST', `/api/demo/scenario?scenario=${scenario}`);
+

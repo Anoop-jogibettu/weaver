@@ -96,11 +96,44 @@ app.post('/api/analyze',  (req, res) => proxyToPython('/analyze',  'POST', req.b
 app.post('/api/classify', (req, res) => proxyToPython('/classify', 'POST', req.body, res));
 app.post('/api/train',    (req, res) => proxyToPython('/train',    'POST', req.body, res));
 app.post('/api/evaluate', (req, res) => proxyToPython('/evaluate', 'POST', {}, res));
+app.post('/api/run',      (req, res) => proxyToPython('/run',      'POST', req.body, res));
+app.post('/api/repl',     (req, res) => proxyToPython('/repl',     'POST', req.body, res));
+app.post('/api/format',   (req, res) => proxyToPython('/format',   'POST', req.body, res));
+app.post('/api/lint',     (req, res) => proxyToPython('/lint',     'POST', req.body, res));
 app.get('/api/model/status',   (req, res) => proxyToPython('/model/status',   'GET', null, res));
 app.get('/api/dataset/stats',  (req, res) => proxyToPython('/dataset/stats',  'GET', null, res));
 app.post('/api/demo/scenario', (req, res) => {
   const scenario = req.query.scenario || 'compatible';
   proxyToPython(`/demo/scenario?scenario=${scenario}`, 'POST', {}, res);
+});
+
+// Save/update file content in a session
+app.put('/sessions/:id/files/:file', (req, res) => {
+  const s = sessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session not found' });
+  s.files[req.params.file] = req.body.content || '';
+  res.json({ ok: true, file: req.params.file });
+});
+
+// Rename file in session
+app.post('/sessions/:id/files/:file/rename', (req, res) => {
+  const s = sessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session not found' });
+  const newName = req.body.newName;
+  if (!newName) return res.status(400).json({ error: 'newName is required' });
+  if (s.files[req.params.file] !== undefined) {
+    s.files[newName] = s.files[req.params.file];
+    delete s.files[req.params.file];
+  }
+  res.json({ ok: true, oldFile: req.params.file, newFile: newName });
+});
+
+// Delete file in session
+app.delete('/sessions/:id/files/:file', (req, res) => {
+  const s = sessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session not found' });
+  delete s.files[req.params.file];
+  res.json({ ok: true, file: req.params.file });
 });
 
 // ─── HTTP + WebSocket server ──────────────────────────────────────────────────
