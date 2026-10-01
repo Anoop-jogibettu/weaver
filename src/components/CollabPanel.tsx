@@ -21,17 +21,13 @@ interface CollabPanelProps {
   onOpenLogs?: () => void;
   followingUserId?: string | null;
   onFollowUser?: (userId: string | null) => void;
+  onSimulateConflict?: () => void;
 }
 
 const syncLabel: Record<string, string> = {
-  connected: 'Synchronized',
-  connecting: 'Connecting',
-  disconnected: 'Offline',
-};
-const syncClass: Record<string, string> = {
-  connected: 'green',
-  connecting: 'yellow',
-  disconnected: 'grey',
+  connected:    'synced',
+  connecting:   'connecting',
+  disconnected: 'offline',
 };
 
 export const CollabPanel: React.FC<CollabPanelProps> = ({
@@ -53,6 +49,7 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
   onOpenLogs,
   followingUserId,
   onFollowUser,
+  onSimulateConflict,
 }) => {
   const [copied, setCopied] = useState(false);
 
@@ -79,25 +76,29 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
 
       <div className="panel-body">
 
-        {/* ── Live Conflict Guard ─────────────────────────────────────────────── */}
-        <div className={`panel-section live-monitor-card ${isConflict ? 'live-conflict' : isCompat ? 'live-compatible' : ''}`}>
+        {/* ── Conflict Guard ──────────────────────────────────────────────── */}
+        <div className={`panel-section live-monitor-card${isConflict ? ' live-conflict' : isCompat ? ' live-compatible' : ''}`}>
           <div className="panel-section-title">
             <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
               <span className={`live-dot ${hasActivity ? (isConflict ? 'live-dot-red' : 'live-dot-green') : 'live-dot-grey'}`} />
               Conflict Guard
             </span>
-            {hasActivity && isConflict && (
-              <button
-                className="btn btn-danger btn-sm"
-                onClick={onShowConflict}
-                style={{ fontSize: 10, padding: '1px 6px' }}
-              >
-                Review
-              </button>
-            )}
+            <span style={{ display: 'flex', gap: 4 }}>
+              {hasActivity && isConflict && (
+                <button className="sim-peer-btn" onClick={onShowConflict}>Review</button>
+              )}
+              {!hasActivity && onSimulateConflict && (
+                <button
+                  className="sim-peer-btn"
+                  onClick={onSimulateConflict}
+                  title="Simulate a peer editing the same function for demo"
+                >
+                  Simulate
+                </button>
+              )}
+            </span>
           </div>
 
-          {/* Your target */}
           <div className="live-row">
             <span className="live-row-label">Your target</span>
             <span className="live-row-value">
@@ -107,7 +108,7 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
                     {localActiveNode.node_type === 'ClassDef' ? 'cls' : 'fn'}
                   </span>
                   {localActiveNode.name}
-                  <span className="node-chip-line"> L{localActiveNode.line_start}</span>
+                  <span className="node-chip-line">L{localActiveNode.line_start}</span>
                 </span>
               ) : (
                 <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>
@@ -115,7 +116,6 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
             </span>
           </div>
 
-          {/* Peer target */}
           <div className="live-row">
             <span className="live-row-label">Peer target</span>
             <span className="live-row-value">
@@ -123,20 +123,19 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
                 <span className="node-chip peer-chip">
                   <span className="node-chip-type">fn</span>
                   <span style={{ color: liveConflict!.peerColor }}>{liveConflict!.peerNode}</span>
-                  <span className="node-chip-peer"> @{liveConflict!.peerName}</span>
+                  <span className="node-chip-peer">@{liveConflict!.peerName}</span>
                 </span>
               ) : (
                 <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                  No peers editing concurrently
+                  No concurrent peers
                 </span>
               )}
             </span>
           </div>
 
-          {/* ML verdict */}
           {hasActivity && (
             <div className="live-row">
-              <span className="live-row-label">ML verdict</span>
+              <span className="live-row-label">Verdict</span>
               <span className="live-row-value">
                 {isChecking && (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-muted)', fontSize: 11 }}>
@@ -158,9 +157,8 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
             </div>
           )}
 
-          {/* Confidence bar */}
           {hasActivity && liveConflict!.confidence > 0 && (
-            <div className="conf-bar-track" style={{ margin: '4px 12px 8px' }}>
+            <div className="conf-bar-track" style={{ margin: '4px 12px 6px' }}>
               <div
                 className={`conf-bar-fill ${isConflict ? 'error' : 'ok'}`}
                 style={{ width: `${liveConflict!.confidence * 100}%` }}
@@ -169,27 +167,12 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
           )}
         </div>
 
-        {/* ── Workspace / Session ────────────────────────────────────────────── */}
+        {/* ── Collaborators ───────────────────────────────────────────────── */}
         <div className="panel-section">
-          <div className="panel-section-title">Workspace</div>
-          <div className="panel-row" style={{ alignItems: 'center' }}>
-            <span className="panel-row-label">ID</span>
-            <span className="panel-row-value accent" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', display: 'flex', alignItems: 'center', gap: 6 }}>
-              {sessionId}
-              <button
-                className="session-copy-btn"
-                title="Copy Session ID"
-                onClick={handleCopyId}
-              >
-                {copied ? '✓ Copied' : 'Copy'}
-              </button>
-            </span>
+          <div className="panel-section-title">
+            <span>Collaborators</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>{allUsers.length}</span>
           </div>
-        </div>
-
-        {/* ── Collaborators ─────────────────────────────────────────────────── */}
-        <div className="panel-section">
-          <div className="panel-section-title">Collaborators ({allUsers.length})</div>
 
           {followingUserId && (
             <div className="following-banner">
@@ -197,33 +180,24 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
               <span className="following-text">
                 Following <strong>@{allUsers.find((u) => u.id === followingUserId)?.name || 'Peer'}</strong>
               </span>
-              <button
-                className="following-stop-btn"
-                onClick={() => onFollowUser?.(null)}
-                title="Stop following peer cursor"
-              >
-                Stop
-              </button>
+              <button className="following-stop-btn" onClick={() => onFollowUser?.(null)}>Stop</button>
             </div>
           )}
 
           {allUsers.length === 0 ? (
             <div style={{ padding: '4px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-              No other users connected
+              No peers connected
             </div>
           ) : (
             allUsers.map((u) => {
               const name  = u.name  || 'Collaborator';
-              const color = u.color || '#4d9cf3';
+              const color = u.color || '#5e81ac';
               const isMe = u.id === localUser?.id;
               const isFollowing = followingUserId === u.id;
 
               return (
                 <div key={u.id} className="user-entry">
-                  <div
-                    className="user-avatar"
-                    style={{ background: color + '22', color }}
-                  >
+                  <div className="user-avatar" style={{ background: color + '33', color }}>
                     {(name[0] || 'U').toUpperCase()}
                   </div>
                   <span className="user-name">{name}</span>
@@ -233,7 +207,7 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
                     <button
                       className={`user-follow-btn ${isFollowing ? 'active' : ''}`}
                       onClick={() => onFollowUser(isFollowing ? null : u.id)}
-                      title={isFollowing ? 'Stop following' : `Follow ${name}'s active cursor & line`}
+                      title={isFollowing ? 'Stop following' : `Follow ${name}`}
                     >
                       {isFollowing ? 'Following' : 'Follow'}
                     </button>
@@ -244,45 +218,32 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
           )}
         </div>
 
-        {/* ── Recent Activity & Merges ───────────────────────────────────────── */}
+        {/* ── Activity ────────────────────────────────────────────────────── */}
         <div className="panel-section">
-          <div className="panel-section-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span>Activity & Merges ({activityLogs.length})</span>
+          <div className="panel-section-title">
+            <span>Activity</span>
             {onOpenLogs && (
-              <button
-                className="panel-link-btn"
-                onClick={onOpenLogs}
-                title="Open full activity log panel"
-              >
-                View all →
-              </button>
+              <button className="panel-link-btn" onClick={onOpenLogs}>View all</button>
             )}
           </div>
           {activityLogs.length === 0 ? (
-            <div style={{ padding: '6px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-              No collaborator merges or actions yet
+            <div style={{ padding: '4px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
+              No activity yet
             </div>
           ) : (
             <div className="recent-log-list">
               {activityLogs.slice(-3).reverse().map((item) => {
                 const time = new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                 return (
-                  <div
-                    key={item.id}
-                    className="recent-log-item"
-                    onClick={onOpenLogs}
-                    title="Click to view details in log panel"
-                  >
+                  <div key={item.id} className="recent-log-item" onClick={onOpenLogs}>
                     <div className="recent-log-header">
                       <span
                         className="recent-log-dot"
                         style={{
                           background:
-                            item.type === 'merge'
-                              ? 'var(--green)'
-                              : item.type === 'conflict'
-                              ? 'var(--red)'
-                              : item.userColor || 'var(--accent)',
+                            item.type === 'merge' ? 'var(--green)'
+                            : item.type === 'conflict' ? 'var(--red)'
+                            : item.userColor || 'var(--accent)',
                         }}
                       />
                       <span className="recent-log-actor" style={{ color: item.userColor }}>
@@ -298,13 +259,13 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
           )}
         </div>
 
-        {/* ── Synchronization ───────────────────────────────────────────────── */}
+        {/* ── Synchronization ─────────────────────────────────────────────── */}
         <div className="panel-section">
           <div className="panel-section-title">Synchronization</div>
           <div className="panel-row">
-            <span className="panel-row-label">CRDT State</span>
+            <span className="panel-row-label">CRDT</span>
             <span className="panel-row-value" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span className={`status-dot ${syncClass[syncStatus]}${syncStatus === 'connecting' ? ' pulse' : ''}`} />
+              <span className={`status-dot ${syncStatus === 'connected' ? 'green' : syncStatus === 'connecting' ? 'yellow pulse' : 'grey'}`} />
               {syncLabel[syncStatus]}
             </span>
           </div>
@@ -324,10 +285,11 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
           <div className="panel-row">
             <span className="panel-row-label">Parser</span>
             <span className="panel-row-value">
-              {astStatus === 'idle' && <span style={{ color: 'var(--text-muted)' }}>idle</span>}
+              {astStatus === 'idle' && <span className="state-label muted">idle</span>}
               {astStatus === 'parsing' && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--yellow)', fontSize: 11 }}>
-                  <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} /> parsing
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                  <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />
+                  <span style={{ color: 'var(--yellow)' }}>parsing</span>
                 </span>
               )}
               {astStatus === 'ready' && <span className="state-label ok">ready</span>}
@@ -335,36 +297,37 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
             </span>
           </div>
           <div className="panel-row">
-            <span className="panel-row-label">Structural conflicts</span>
-            <span className={`panel-row-value ${conflictCount > 0 ? 'error' : 'ok'}`}>
+            <span className="panel-row-label">Conflicts</span>
+            <span className={`panel-row-value ${conflictCount > 0 ? 'error' : ''}`}>
               {conflictCount}
             </span>
           </div>
         </div>
 
-        {/* ── ML Conflict Predictor ─────────────────────────────────────────── */}
+        {/* ── Conflict Prediction ──────────────────────────────────────────── */}
         <div className="panel-section">
-          <div className="panel-section-title">ML Conflict Predictor</div>
+          <div className="panel-section-title">Conflict Prediction</div>
           <div className="panel-row">
             <span className="panel-row-label">Status</span>
             <span className="panel-row-value">
-              {mlStatus === 'idle' && <span style={{ color: 'var(--text-muted)' }}>idle</span>}
+              {mlStatus === 'idle' && <span className="state-label muted">idle</span>}
               {mlStatus === 'classifying' && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--yellow)', fontSize: 11 }}>
-                  <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} /> analyzing
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                  <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />
+                  <span style={{ color: 'var(--yellow)' }}>analyzing</span>
                 </span>
               )}
-              {mlStatus === 'ready' && <span className="state-label ok">active</span>}
+              {mlStatus === 'ready' && <span className="state-label ok">ready</span>}
             </span>
           </div>
           <div className="panel-row">
             <span className="panel-row-label">Prediction</span>
             <span className="panel-row-value">
               {mlPrediction === 'Compatible' && (
-                <span className="badge badge-compatible">{mlPrediction}</span>
+                <span className="badge badge-compatible">compatible</span>
               )}
               {mlPrediction === 'Potential Conflict' && (
-                <span className="badge badge-conflict">Conflict</span>
+                <span className="badge badge-conflict">conflict</span>
               )}
               {mlPrediction && mlPrediction !== 'Compatible' && mlPrediction !== 'Potential Conflict' && (
                 <span className="badge badge-uncertain">{mlPrediction}</span>
@@ -392,6 +355,22 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
               />
             </div>
           )}
+        </div>
+
+        {/* ── Workspace ID ─────────────────────────────────────────────────── */}
+        <div className="panel-section" style={{ paddingBottom: 10 }}>
+          <div className="panel-section-title">Workspace</div>
+          <div className="panel-row" style={{ alignItems: 'center' }}>
+            <span className="panel-row-label">ID</span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', letterSpacing: '0.06em' }}>
+                {sessionId}
+              </span>
+              <button className="session-copy-btn" onClick={handleCopyId}>
+                {copied ? 'copied' : 'copy'}
+              </button>
+            </span>
+          </div>
         </div>
 
       </div>

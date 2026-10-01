@@ -10,6 +10,8 @@ import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import { setupWSConnection } from 'y-websocket/bin/utils';
 import { v4 as uuidv4 } from 'uuid';
+import pty from 'node-pty';
+import os from 'os';
 
 const app = express();
 const PORT = 1234;
@@ -19,41 +21,66 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
 // ─── Session store ────────────────────────────────────────────────────────────
-const sessions = new Map();
+// Each session tracks:
+//   host        - userId of current host
+//   joinOrder   - Map<clientId, {userId, joinedAt}> ordered by join time
+//   wsClients   - Map<clientId, ws> for direct messaging
 
 const DEFAULT_FILES = {
-  'main.py': `def calculate(x):
-    return x * 2
-
-def greet(name):
-    return f"Hello, {name}!"
-`,
-  'utils.py': `def format_output(value):
-    return str(value).strip()
-
-def clamp(val, lo, hi):
-    return max(lo, min(hi, val))
-`,
-  'models.py': `class DataModel:
-    def __init__(self, data):
-        self.data = data
-
-    def validate(self):
-        return self.data is not None
-`,
+  'main.py': `def calculate(x):\n    return x * 2\n\ndef greet(name):\n    return f"Hello, {name}!"\n`,
+  'utils.py': `def format_output(value):\n    return str(value).strip()\n\ndef clamp(val, lo, hi):\n    return max(lo, min(hi, val))\n`,
 };
+
+const sessions = new Map();
+
+function getOrCreateSession(sessionId) {
+  if (!sessions.has(sessionId)) {
+    sessions.set(sessionId, {
+      host: null,
+      joinOrder: new Map(),  // clientId -> { userId, userName, joinedAt }
+      wsClients: new Map(),  // clientId -> ws socket
+      files: { ...DEFAULT_FILES },
+      created: Date.now(),
+    });
+    console.log(`[session] Created: ${sessionId}`);
+  }
+  return sessions.get(sessionId);
+}
+
+function electNewHost(session, sessionId) {
+  // Pick the earliest joiner that is still connected (excluding current host)
+  let earliest = null;
+  let earliestTime = Infinity;
+  for (const [cid, info] of session.joinOrder) {
+    if (session.wsClients.has(cid) && info.joinedAt < earliestTime) {
+      earliest = { cid, ...info };
+      earliestTime = info.joinedAt;
+    }
+  }
+  if (!earliest) return null;
+
+  session.host = earliest.userId;
+  console.log(`[session] ${sessionId} — new host: ${earliest.userName} (${earliest.userId})`);
+
+  // Broadcast host-transfer to all remaining clients
+  const msg = JSON.stringify({
+    type: 'host-transfer',
+    newHostUserId: earliest.userId,
+    newHostUserName: earliest.userName,
+    sessionId,
+  });
+  for (const ws of session.wsClients.values()) {
+    try { if (ws.readyState === 1) ws.send(msg); } catch {}
+  }
+  return earliest;
+}
 
 app.get('/health', (_, res) => res.json({ status: 'ok', python: PYTHON_SERVICE }));
 
 // Create a new collaboration session
 app.post('/sessions', (req, res) => {
   const sessionId = Math.random().toString(36).slice(2, 8).toUpperCase();
-  sessions.set(sessionId, {
-    users: new Set(),
-    created: Date.now(),
-    files: { ...DEFAULT_FILES },
-  });
-  console.log(`[session] Created: ${sessionId}`);
+  getOrCreateSession(sessionId);
   res.json({ sessionId });
 });
 
@@ -63,10 +90,12 @@ app.get('/sessions/:id', (req, res) => {
   if (!s) return res.status(404).json({ error: 'Session not found' });
   res.json({
     sessionId: req.params.id,
-    userCount: s.users.size,
+    userCount: s.wsClients.size,
+    host: s.host,
     files: Object.keys(s.files),
   });
 });
+
 
 // Get file content
 app.get('/sessions/:id/files/:file', (req, res) => {
@@ -102,6 +131,7 @@ app.post('/api/format',   (req, res) => proxyToPython('/format',   'POST', req.b
 app.post('/api/lint',     (req, res) => proxyToPython('/lint',     'POST', req.body, res));
 app.get('/api/model/status',   (req, res) => proxyToPython('/model/status',   'GET', null, res));
 app.get('/api/dataset/stats',  (req, res) => proxyToPython('/dataset/stats',  'GET', null, res));
+app.post('/api/smart-merge',   (req, res) => proxyToPython('/smart-merge',    'POST', req.body, res));
 app.post('/api/demo/scenario', (req, res) => {
   const scenario = req.query.scenario || 'compatible';
   proxyToPython(`/demo/scenario?scenario=${scenario}`, 'POST', {}, res);
@@ -140,9 +170,123 @@ app.delete('/sessions/:id/files/:file', (req, res) => {
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
+// Custom connection handler: wraps y-websocket's setupWSConnection and adds
+// host-tracking, join-order recording, and failover logic.
 wss.on('connection', (ws, req) => {
-  console.log(`[ws] New connection: ${req.url}`);
+  // Parse sessionId from URL: /weaver-ABCDEF
+  const urlParts = (req.url || '').split('/');
+  const roomName = urlParts[urlParts.length - 1] || '';
+  const sessionId = roomName.replace(/^weaver-/, '');
+  const clientId  = Math.random().toString(36).slice(2, 10);
+
+  console.log(`[ws] New connection: ${req.url} (client: ${clientId})`);
+
+  if (req.url && req.url.startsWith('/terminal')) {
+    const shell = os.platform() === 'win32' ? 'powershell.exe' : (process.env.SHELL || 'bash');
+    const ptyProcess = pty.spawn(shell, [], {
+      name: 'xterm-color',
+      cols: 80,
+      rows: 30,
+      cwd: process.env.HOME || process.cwd(),
+      env: process.env
+    });
+
+    ptyProcess.onData((data) => {
+      if (ws.readyState === 1) ws.send(data);
+    });
+
+    ws.on('message', (msg) => {
+      if (typeof msg === 'string') {
+        ptyProcess.write(msg);
+      } else if (Buffer.isBuffer(msg)) {
+        ptyProcess.write(msg.toString('utf8'));
+      }
+    });
+
+    ws.on('close', () => ptyProcess.kill());
+    return; // Skip yjs setup
+  }
+
+  // Attach y-websocket CRDT sync (this handles all Yjs messages)
   setupWSConnection(ws, req);
+
+  const session = getOrCreateSession(sessionId);
+  session.wsClients.set(clientId, ws);
+
+  // First connected client becomes host automatically
+  const isFirstClient = session.joinOrder.size === 0;
+
+  // We get userId/userName from a client 'register' message sent right after connection
+  // Store a provisional entry; update when register arrives
+  session.joinOrder.set(clientId, {
+    userId: clientId,       // temp; overwritten on 'register'
+    userName: 'Unknown',
+    joinedAt: Date.now(),
+    isHost: isFirstClient,
+  });
+
+  if (isFirstClient) {
+    session.host = clientId;
+    // Tell this client it is the host
+    try {
+      ws.send(JSON.stringify({ type: 'host-assign', isHost: true, sessionId }));
+    } catch {}
+  } else {
+    // Tell this client the current host userId
+    try {
+      ws.send(JSON.stringify({ type: 'host-assign', isHost: false, sessionId, currentHostUserId: session.host }));
+    } catch {}
+  }
+
+  ws.on('message', (raw) => {
+    // Only intercept text/JSON messages; binary are Yjs protocol, ignore
+    let str = null;
+    if (Buffer.isBuffer(raw) && raw.length > 0 && raw[0] === 123) { // 123 is '{'
+      str = raw.toString('utf8');
+    } else if (typeof raw === 'string') {
+      str = raw;
+    }
+    
+    if (!str || !str.trim().startsWith('{')) return;
+    let msg;
+    try { msg = JSON.parse(str); } catch { return; }
+
+    if (msg.type === 'register') {
+      // Client announcing identity after joining
+      const entry = session.joinOrder.get(clientId);
+      if (entry) {
+        entry.userId   = msg.userId   || clientId;
+        entry.userName = msg.userName || 'User';
+      }
+      if (isFirstClient || session.host === clientId) {
+        session.host = msg.userId;
+        if (entry) entry.userId = msg.userId;
+      }
+      console.log(`[session] ${sessionId} register: ${msg.userName} (host=${isFirstClient})`);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log(`[ws] Disconnected: ${req.url} (client: ${clientId})`);
+    const entry = session.joinOrder.get(clientId);
+    session.wsClients.delete(clientId);
+    session.joinOrder.delete(clientId);
+
+    // If the disconnected client was the host, elect a new one
+    const wasHost = entry && (entry.userId === session.host || entry.isHost);
+    if (wasHost && session.wsClients.size > 0) {
+      electNewHost(session, sessionId);
+    }
+
+    // Cleanup empty session
+    if (session.wsClients.size === 0) {
+      console.log(`[session] ${sessionId} — all clients gone, keeping session data`);
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[ws] Error (${clientId}):`, err.message);
+  });
 });
 
 server.listen(PORT, () => {

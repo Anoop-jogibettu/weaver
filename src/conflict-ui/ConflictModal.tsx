@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { smartMerge } from '../api/client';
 
 export interface ConflictData {
   proposalId?: string;
@@ -52,6 +53,7 @@ export const ConflictModal: React.FC<ConflictModalProps> = ({
 
   const [activeTab, setActiveTab] = useState<'compare' | 'custom'>('compare');
   const [customText, setCustomText] = useState(collaboratorContent);
+  const [isMerging, setIsMerging] = useState(false);
 
   const isConflict = prediction ? prediction.label === 1 || prediction.prediction.toLowerCase().includes('conflict') : true;
 
@@ -60,6 +62,23 @@ export const ConflictModal: React.FC<ConflictModalProps> = ({
       onCustomMerge(customText);
     } else {
       onAcceptCollaborator();
+    }
+  };
+
+  const handleSmartMerge = async () => {
+    setIsMerging(true);
+    try {
+      const res = await smartMerge(hostContent, collaboratorContent, filename);
+      if (res.success && res.merged_code) {
+        setCustomText(res.merged_code);
+        setActiveTab('custom');
+      } else {
+        alert('Smart Merge failed: ' + (res.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Smart Merge failed due to a network error.');
+    } finally {
+      setIsMerging(false);
     }
   };
 
@@ -130,6 +149,28 @@ export const ConflictModal: React.FC<ConflictModalProps> = ({
             onClick={() => setActiveTab('custom')}
           >
             Manual Merge Editor
+          </button>
+          <button
+            style={{
+              background: 'transparent',
+              border: '1px solid var(--accent)',
+              borderRadius: 4,
+              color: 'var(--accent)',
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: isMerging ? 'wait' : 'pointer',
+              marginLeft: 'auto',
+              alignSelf: 'center',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              opacity: isMerging ? 0.6 : 1
+            }}
+            onClick={handleSmartMerge}
+            disabled={isMerging}
+          >
+            {isMerging ? '🪄 Merging...' : '🪄 AI Smart Merge'}
           </button>
         </div>
 

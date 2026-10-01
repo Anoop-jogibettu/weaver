@@ -12,11 +12,12 @@
  * 5. Return live conflict state for rendering
  */
 
-import { useState, useCallback, useRef } from 'react';
-import { parseSource } from '../api/client';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { parseSource, classifyChanges } from '../api/client';
 import {
   broadcastActiveNode,
   getPeerActiveEdits,
+  subscribeAwareness,
   type ActiveNodeInfo,
 } from '../collaboration/store';
 import type { LiveConflictState } from './LiveConflictBanner';
@@ -59,8 +60,12 @@ function findNodeAtLine(nodes: { node_type: string; name?: string; line_start: n
 export function useLiveConflictDetector() {
   const [liveConflict, setLiveConflict] = useState<LiveConflictState>(IDLE_STATE);
   const [localActiveNode, setLocalActiveNode] = useState<ActiveNodeInfo | null>(null);
+  const [simulatedPeer, setSimulatedPeer] = useState<PeerEditState | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  // Track latest state to re-analyze when peers move
+  const latestContext = useRef({ content: '', file: '', cursorLine: 1 });
 
   const resetToIdle = useCallback(() => {
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
@@ -76,6 +81,7 @@ export function useLiveConflictDetector() {
    */
   const analyzeEdit = useCallback(
     (content: string, file: string, cursorLine: number) => {
+      latestContext.current = { content, file, cursorLine };
       // Reset idle timer whenever user types
       resetToIdle();
 
@@ -94,8 +100,11 @@ export function useLiveConflictDetector() {
           // 2. Broadcast our current editing state to peers
           broadcastActiveNode(file, cursorLine, myNode, true);
 
-          // 3. Get peer edits for the same file
+          // 3. Get peer edits for the same file (plus any simulated peer for demo purposes)
           const peerEdits = getPeerActiveEdits().filter((p) => p.activeFile === file && p.editing);
+          if (simulatedPeer && simulatedPeer.activeFile === file) {
+            peerEdits.push(simulatedPeer);
+          }
 
           if (peerEdits.length === 0) {
             // Nobody else editing this file right now
@@ -201,5 +210,45 @@ export function useLiveConflictDetector() {
     [resetToIdle],
   );
 
-  return { liveConflict, localActiveNode, analyzeEdit };
+  // When awareness changes (e.g. a peer types or moves), re-evaluate against our current context
+  useEffect(() => {
+    const unsub = subscribeAwareness(() => {
+      const { content, file, cursorLine } = latestContext.current;
+      if (content && file) {
+        analyzeEdit(content, file, cursorLine);
+      }
+    });
+    return unsub;
+  }, [analyzeEdit]);
+
+  // Demo helper: simulate a peer editing the exact same node we are
+  const triggerSimulatedConflict = useCallback(() => {
+    const { content, file, cursorLine } = latestContext.current;
+    if (!file) return;
+    
+    // Fake peer editing same location
+    const peer: PeerEditState = {
+      user: { id: 'sim-1', name: 'DemoBot', color: '#f59e0b', isHost: false },
+      activeFile: file,
+      activeLine: cursorLine,
+      activeNode: localActiveNode || { node_type: 'FunctionDef', name: 'demo_function', line_start: cursorLine, line_end: cursorLine + 5, operation: 'modified' },
+      editing: true,
+      lastEditTime: Date.now(),
+    };
+    
+    setSimulatedPeer(peer);
+    
+    // Re-run analysis immediately
+    if (content) {
+      analyzeEdit(content, file, cursorLine);
+    }
+    
+    // Clear simulation after 10 seconds
+    setTimeout(() => {
+      setSimulatedPeer(null);
+      resetToIdle();
+    }, 10000);
+  }, [localActiveNode, analyzeEdit, resetToIdle]);
+
+  return { liveConflict, localActiveNode, analyzeEdit, triggerSimulatedConflict };
 }

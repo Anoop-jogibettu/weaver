@@ -76,12 +76,15 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     initialContentRef.current = initialContent;
   }
 
-  const { initEditor, destroyEditor, scrollToLine } = useEditor(containerRef, {
+  const isDraftMode = !file.endsWith('.md') && !file.endsWith('.txt');
+
+  const { initEditor, destroyEditor, scrollToLine, getContent } = useEditor(containerRef, {
     file,
     initialContent: initialContentRef.current || DEFAULT_CONTENTS[file] || '',
     awareness: getAwareness(),
     onChange: handleChange,
     onCursorLine: handleCursorLine,
+    isDraftMode,
   });
 
   useEffect(() => {
@@ -122,6 +125,16 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     liveConflict &&
     (liveConflict.severity === 'conflict' || liveConflict.severity === 'compatible');
 
+  const handlePushToShared = () => {
+    if (!ytextRef.current) return;
+    const currentShared = ytextRef.current.toString();
+    const localContent = getContent();
+    if (currentShared !== localContent) {
+      ytextRef.current.delete(0, ytextRef.current.length);
+      ytextRef.current.insert(0, localContent);
+    }
+  };
+
   return (
     <div className="editor-wrap">
       {/* Live As-You-Type Conflict Banner */}
@@ -135,6 +148,20 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       {/* Active AST node chip */}
       {localNodeName && localNodeLine && (
         <ActiveNodeChip nodeName={localNodeName} lineStart={localNodeLine} />
+      )}
+
+      {/* Draft Mode Toolbar */}
+      {isDraftMode && ready && (
+        <div style={{ position: 'absolute', top: 10, right: 20, zIndex: 10 }}>
+          <button 
+            className="editor-action-btn accent" 
+            onClick={handlePushToShared}
+            title="Push local draft to shared collaborative document"
+            style={{ backgroundColor: '#2ea043', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            🚀 Push to Shared
+          </button>
+        </div>
       )}
 
       {!ready && (

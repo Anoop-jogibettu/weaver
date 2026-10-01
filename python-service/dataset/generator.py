@@ -28,7 +28,7 @@ FEATURES = [
 ]
 
 
-def generate_dataset(n_samples: int = 800) -> list[dict]:
+def generate_dataset(n_samples: int = 100000) -> list[dict]:
     """Generate n_samples synthetic concurrent change pairs."""
     random.seed(42)
     samples = []
@@ -257,6 +257,6 @@ def load_dataset(path: Path = DATASET_PATH):
 
 
 if __name__ == "__main__":
-    samples = generate_dataset(800)
+    samples = generate_dataset(100000)
     out = save_dataset(samples)
     print(f"Dataset saved: {out} ({len(samples)} samples)")

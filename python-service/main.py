@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import os
 import ast
 from typing import Optional, Any, Dict, List
 
@@ -48,6 +49,11 @@ class DiffRequest(BaseModel):
 class AnalyzeRequest(BaseModel):
     change_a: dict
     change_b: dict
+
+class SmartMergeRequest(BaseModel):
+    host_code: str
+    collaborator_code: str
+    filename: str
 
 
 class ClassifyRequest(BaseModel):
@@ -135,6 +141,46 @@ def classify_endpoint(req: ClassifyRequest):
     }
 
 
+@app.post("/smart-merge")
+def smart_merge_endpoint(req: SmartMergeRequest):
+    """
+    Use an LLM (Gemini) to perform a smart semantic merge of two conflicting code blocks.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return {
+            "success": True,
+            "merged_code": "# [Mocked AI Merge] (Set GEMINI_API_KEY environment variable to enable real AI)\n\n" + req.host_code + "\n\n# --- Collaborator Additions ---\n" + req.collaborator_code
+        }
+    
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        prompt = f'''You are an expert Python developer resolving a merge conflict.
+Output ONLY the final resolved raw code. Do NOT output markdown code blocks (e.g. ```python).
+Safely combine the intentions of both versions.
+
+File: {req.filename}
+
+--- Host Version ---
+{req.host_code}
+
+--- Collaborator Version ---
+{req.collaborator_code}
+'''
+        response = model.generate_content(prompt)
+        text = response.text
+        if text.startswith("```python"):
+            text = text[9:]
+        if text.endswith("```"):
+            text = text[:-3]
+        return {"success": True, "merged_code": text.strip()}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/train")
 def train_endpoint(req: TrainRequest):
     """
@@ -154,11 +200,14 @@ def train_endpoint(req: TrainRequest):
 
 @app.get("/model/status")
 def model_status():
-    """Return current model training results."""
+    """Return current model training results and LLM status."""
+    llm_key = os.environ.get("GEMINI_API_KEY", "")
+    llm_ready = len(llm_key) > 10
+    
     if not is_trained():
-        return {"trained": False, "results": None}
+        return {"trained": False, "results": None, "llm_ready": llm_ready}
     results = get_last_results()
-    return {"trained": True, "results": results}
+    return {"trained": True, "results": results, "llm_ready": llm_ready}
 
 
 @app.post("/evaluate")
@@ -276,8 +325,23 @@ def run_endpoint(req: RunRequest):
 
         try:
             t0 = time.monotonic()
+            
+            # Check if docker is available for sandboxing
+            docker_available = False
+            try:
+                docker_check = subprocess.run(["docker", "info"], capture_output=True, timeout=2)
+                if docker_check.returncode == 0:
+                    docker_available = True
+            except Exception:
+                pass
+            
+            if docker_available:
+                cmd = ["docker", "run", "--rm", "-v", f"{tmp_dir}:/app", "-w", "/app", "python:3.9-slim", "python", active_target]
+            else:
+                cmd = [sys.executable, active_target]
+                
             result = subprocess.run(
-                [sys.executable, active_target],
+                cmd,
                 input=req.stdin or "",
                 capture_output=True,
                 text=True,

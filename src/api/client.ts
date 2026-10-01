@@ -1,6 +1,6 @@
 // Weaver API Client — communicates with Node.js backend which proxies to Python service
 
-const BASE = 'http://localhost:1234';
+const BASE = `http://${window.location.hostname}:1234`;
 
 async function call(method: string, path: string, body?: unknown) {
   const opts: RequestInit = {
@@ -55,7 +55,7 @@ export const lintCode = (source: string, filename = 'script.py') =>
   call('POST', '/api/lint', { source, filename });
 
 // ─── ML Training / Evaluation ─────────────────────────────────────────────────
-export const trainModel = (algorithm = 'random_forest', nSamples = 800) =>
+export const trainModel = (algorithm = 'random_forest', nSamples = 100000) =>
   call('POST', '/api/train', { algorithm, n_samples: nSamples });
 
 export const evaluateModel = () => call('POST', '/api/evaluate');
@@ -67,4 +67,7 @@ export const getDatasetStats = () => call('GET', '/api/dataset/stats');
 // ─── Demo Scenarios ───────────────────────────────────────────────────────────
 export const runDemoScenario = (scenario: 'compatible' | 'conflict') =>
   call('POST', `/api/demo/scenario?scenario=${scenario}`);
+
+export const smartMerge = (hostCode: string, collaboratorCode: string, filename: string) =>
+  call('POST', '/api/smart-merge', { host_code: hostCode, collaborator_code: collaboratorCode, filename });
 

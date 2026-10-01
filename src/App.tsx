@@ -10,6 +10,7 @@ import type { RunResult, BottomPanelTab } from './editor/OutputPanel';
 import { useLiveConflictDetector } from './editor/useLiveConflictDetector';
 import { SnapshotsModal } from './components/SnapshotsModal';
 import { CommentsDrawer } from './components/CommentsDrawer';
+import { FileExplorer } from './components/FileExplorer';
 import {
   initCollaboration,
   getConnectedUsers,
@@ -39,6 +40,7 @@ import {
   getMergeProposals,
   subscribeMergeProposals,
   resolveMergeProposal,
+  subscribeHostTransfer,
   type UserInfo,
   type ActivityLogItem,
   type MergeProposal,
@@ -133,7 +135,7 @@ function App() {
   const [headerCopied, setHeaderCopied] = useState(false);
 
   // ─── Live as-you-type conflict detector ──────────────────────────────────
-  const { liveConflict, localActiveNode, analyzeEdit } = useLiveConflictDetector();
+  const { liveConflict, localActiveNode, analyzeEdit, triggerSimulatedConflict } = useLiveConflictDetector();
 
   const toast = useCallback((msg: string, type = 'info') => {
     const id = ++toastId.current;
@@ -216,9 +218,9 @@ function App() {
     }
   }, [fileContents, files, toast]);
 
-  // Synchronize canonical host files for connected collaborators
+  // ── Sync shared file list for ALL members (host and collaborators alike) ──
   useEffect(() => {
-    if (!sessionId || isHost) return;
+    if (!sessionId) return;
     const unsub = subscribeHostFiles((hostFiles) => {
       if (hostFiles.length === 0) return;
       setFiles((prev) => {
@@ -229,7 +231,7 @@ function App() {
             setFileContents((fc) => ({ ...fc, [f]: content }));
             prevContents.current[f] = content;
           });
-          toast(`Host added new file(s) to project: ${newlyAdded.join(', ')}`, 'info');
+          if (!isHost) toast(`New file(s) added to project: ${newlyAdded.join(', ')}`, 'info');
           return Array.from(new Set([...prev, ...hostFiles]));
         }
         return prev;
@@ -237,6 +239,58 @@ function App() {
     });
     return unsub;
   }, [isHost, sessionId, toast]);
+
+  // ── Host failover: server elected us as new host ──────────────────────────
+  useEffect(() => {
+    if (!sessionId) return;
+    const unsub = subscribeHostTransfer((newHostUserId, newHostUserName) => {
+      if (newHostUserId === userId) {
+        // WE are the new host — promote ourselves
+        setIsHost(true);
+
+        // Pull all shared Yjs files into local state
+        const hostFiles = getHostFiles();
+        if (hostFiles.length > 0) {
+          setFiles(hostFiles);
+          const contents: Record<string, string> = {};
+          hostFiles.forEach((f) => {
+            contents[f] = getHostYText(f).toString();
+            prevContents.current[f] = contents[f];
+          });
+          setFileContents((prev) => ({ ...prev, ...contents }));
+        }
+
+        const localUser = getLocalUser();
+        addActivityLog({
+          type: 'presence',
+          userId: userId || 'host',
+          userName: currentUserName || 'You',
+          userColor: localUser?.color || '#fbbf24',
+          isHost: true,
+          action: `You have been promoted to Host (previous host disconnected)`,
+        });
+
+        toast(
+          `👑 You are now the Host! All project files have been transferred to you.`,
+          'success',
+        );
+      } else {
+        // Someone else became host
+        setIsHost(false);
+        addActivityLog({
+          type: 'presence',
+          userId: newHostUserId,
+          userName: newHostUserName,
+          userColor: '#fbbf24',
+          isHost: true,
+          action: `${newHostUserName} has taken over as Host`,
+        });
+        toast(`${newHostUserName} is now the Host.`, 'info');
+      }
+    });
+    return unsub;
+  }, [currentUserName, sessionId, userId, toast]);
+
 
   // Log potential structural conflicts when detected
   useEffect(() => {
@@ -320,12 +374,26 @@ function App() {
     e.target.value = '';
   }, [currentUserName, isHost, toast, userId]);
 
-  // ─── New blank file ───────────────────────────────────────────────────────
-  const handleNewFile = useCallback(() => {
-    const base = 'untitled';
-    let name = `${base}.py`;
-    let i = 1;
-    while (files.includes(name)) { name = `${base}${i++}.py`; }
+  // ─── New blank file (optional explicit path from inline input) ─────────────
+  const handleNewFile = useCallback((explicitPath?: string) => {
+    let name: string;
+    if (explicitPath) {
+      // Use the path as-is if provided by inline input
+      name = explicitPath;
+      // Deduplicate if collision
+      if (files.includes(name)) {
+        const base = name.replace(/\.py$/, '');
+        let i = 1;
+        while (files.includes(`${base}${i}.py`)) i++;
+        name = `${base}${i}.py`;
+      }
+    } else {
+      const base = 'untitled';
+      name = `${base}.py`;
+      let i = 1;
+      while (files.includes(name)) { name = `${base}${i++}.py`; }
+    }
+
     setFiles((fs) => [...fs, name]);
     setFileContents((fc) => ({ ...fc, [name]: '' }));
     prevContents.current[name] = '';
@@ -350,6 +418,70 @@ function App() {
       action: `Created new file "${name}"`,
     });
   }, [currentUserName, files, isHost, userId]);
+
+  // ─── New folder (creates first file inside it) ────────────────────────────
+  const handleNewFolder = useCallback((folderPath: string) => {
+    const name = `${folderPath}/untitled.py`;
+    const finalName = files.includes(name) ? `${folderPath}/untitled1.py` : name;
+    setFiles((fs) => [...fs, finalName]);
+    setFileContents((fc) => ({ ...fc, [finalName]: '' }));
+    prevContents.current[finalName] = '';
+    setActiveFile(finalName);
+
+    if (isHost) {
+      addHostFile(finalName);
+      try {
+        const hostText = getHostYText(finalName);
+        if (hostText.length > 0) hostText.delete(0, hostText.length);
+      } catch { /* ignore */ }
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'file',
+      userId: userId || 'user',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#6c8eff',
+      isHost,
+      filename: finalName,
+      action: `Created folder "${folderPath}" with file "${finalName}"`,
+    });
+  }, [currentUserName, files, isHost, userId]);
+
+  // ─── Delete entire folder (remove all files with that prefix) ────────────
+  const handleDeleteFolder = useCallback((folderPath: string) => {
+    const prefix = folderPath + '/';
+    const toRemove = files.filter((f) => f === folderPath || f.startsWith(prefix));
+    if (toRemove.length === 0) return;
+
+    setFiles((fs) => {
+      const next = fs.filter((f) => !toRemove.includes(f));
+      if (toRemove.includes(activeFile) && next.length > 0) {
+        setActiveFile(next[0]);
+      }
+      return next;
+    });
+    setFileContents((fc) => {
+      const copy = { ...fc };
+      toRemove.forEach((f) => delete copy[f]);
+      return copy;
+    });
+    toRemove.forEach((f) => { delete prevContents.current[f]; });
+
+    if (isHost) {
+      toRemove.forEach((f) => removeHostFile(f));
+    }
+
+    const localUser = getLocalUser();
+    addActivityLog({
+      type: 'file',
+      userId: userId || 'user',
+      userName: currentUserName || (isHost ? 'Host' : 'Collaborator'),
+      userColor: localUser?.color || '#ef4444',
+      isHost,
+      action: `Deleted folder "${folderPath}" (${toRemove.length} file${toRemove.length > 1 ? 's' : ''})`,
+    });
+  }, [activeFile, currentUserName, files, isHost, userId]);
 
   // ─── File Renaming Dialog ─────────────────────────────────────────────────
   const openRenameDialog = useCallback((file: string) => {
@@ -1071,103 +1203,60 @@ function App() {
       {/* Title bar */}
       <header className="app-header">
         <div className="logo">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
             <path d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18"/>
           </svg>
-          Weaver
+          <span className="logo-name">Weaver</span>
+        </div>
+
+        <div className="header-workspace">
+          <span>workspace</span>
+          <span className="header-workspace-id">{sessionId}</span>
+          <button className="session-copy-btn" onClick={handleCopyWorkspace}>
+            {headerCopied ? 'copied' : 'copy'}
+          </button>
+          <span className={`header-role-tag${isHost ? ' host' : ''}`}>
+            {isHost ? 'host' : 'collaborator'}
+          </span>
         </div>
 
         <div className="header-sep" />
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
-          <span>Workspace:</span>
-          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', fontWeight: 600 }}>
-            {sessionId}
-          </span>
-          <button
-            className="session-copy-btn"
-            title="Copy Workspace ID"
-            onClick={handleCopyWorkspace}
-          >
-            {headerCopied ? '✓ Copied' : 'Copy'}
-          </button>
-
-          <span style={{ marginLeft: 6 }}>
-            {isHost ? (
-              <span className="version-badge host">👑 Host (Main)</span>
-            ) : (
-              <span className="version-badge branch">🌿 Working Copy</span>
-            )}
-          </span>
+        <div className="header-right">
+          <div className="header-sync-text">
+            <span className={`sync-dot ${syncStatus === 'connected' ? 'ok' : syncStatus === 'connecting' ? 'warn' : 'off'}`} />
+            {syncStatus === 'connected' ? 'synced' : syncStatus === 'connecting' ? 'connecting' : 'offline'}
+          </div>
+          <div className="header-avatars">
+            {[localUser, ...users.filter(u => u.id !== userId)].filter(Boolean).slice(0, 4).map((u, i) => (
+              <div
+                key={u?.id || i}
+                className="h-avatar"
+                style={{ background: u?.color || '#5e81ac' }}
+                title={u?.name || 'User'}
+              >
+                {(u?.name || '?')[0].toUpperCase()}
+              </div>
+            ))}
+          </div>
         </div>
       </header>
 
       {/* Body: Full Editor Workspace */}
       <div className="workspace">
-        {/* Sidebar / Explorer */}
-        <aside className="sidebar">
-          <div className="sidebar-section">
-            <div className="sidebar-label" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 4 }}>
-              <span>Explorer</span>
-              <div style={{ display: 'flex', gap: 2 }}>
-                <button
-                  className="sidebar-icon-btn"
-                  title="New file"
-                  onClick={handleNewFile}
-                >+</button>
-                <button
-                  className="sidebar-icon-btn"
-                  title="Import file(s) from disk"
-                  onClick={() => fileInputRef.current?.click()}
-                >↑</button>
-              </div>
-            </div>
-
-            {files.map((f) => (
-              <div
-                key={f}
-                className={`file-item ${activeFile === f ? 'active' : ''}`}
-                onClick={() => setActiveFile(f)}
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
-                  openRenameDialog(f);
-                }}
-              >
-                <span className="file-dot" />
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {f}
-                </span>
-                <button
-                  className="file-rename-btn"
-                  title="Rename file (or double-click)"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openRenameDialog(f);
-                  }}
-                >✎</button>
-                {files.length > 1 && (
-                  <button
-                    className="file-close-btn"
-                    title="Close file"
-                    onClick={(e) => handleCloseFile(f, e)}
-                  >×</button>
-                )}
-              </div>
-            ))}
-          </div>
-
-          <div className="sidebar-footer">
-            {sessionId && (
-              <div className="session-badge">
-                <div className="session-label">Workspace</div>
-                <div className="session-id">{sessionId}</div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                  {users.length + 1} active collaborator{users.length !== 0 ? 's' : ''}
-                </div>
-              </div>
-            )}
-          </div>
-        </aside>
+        <FileExplorer
+          files={files}
+          activeFile={activeFile}
+          sessionId={sessionId}
+          userCount={users.length}
+          onSelectFile={setActiveFile}
+          onNewFile={handleNewFile}
+          onNewFolder={handleNewFolder}
+          onImportFile={() => fileInputRef.current?.click()}
+          onRenameFile={openRenameDialog}
+          onCloseFile={handleCloseFile}
+          onDeleteFolder={handleDeleteFolder}
+        />
 
         {/* Editor + Output */}
         <main className="editor-area">
@@ -1198,11 +1287,11 @@ function App() {
             <div className="editor-actions" style={{ gap: 6, flexWrap: 'wrap' }}>
               <button
                 className="editor-action-btn"
-                title="Format active Python file with PEP 8 (⇧⌥F)"
+                title="Format active Python file with PEP 8"
                 onClick={handleFormat}
                 disabled={formatting || !activeFile.endsWith('.py')}
               >
-                {formatting ? 'Formatting…' : '⚡ Format'}
+                {formatting ? 'Formatting…' : 'Format'}
               </button>
 
               <button
@@ -1210,7 +1299,7 @@ function App() {
                 title="Inline Code Annotations & Review Comments"
                 onClick={() => setCommentsOpen(!commentsOpen)}
               >
-                💬 Comments
+                Comments
                 {openCommentsCount > 0 && (
                   <span className="btn-counter-badge accent">{openCommentsCount}</span>
                 )}
@@ -1221,7 +1310,7 @@ function App() {
                 title="Project Snapshots & Time Travel"
                 onClick={() => setSnapshotsOpen(true)}
               >
-                ⏱ Snapshots
+                Snapshots
               </button>
 
               <button
@@ -1246,7 +1335,7 @@ function App() {
                     title="Pull latest code from Host into your working copy"
                     onClick={handleSyncFromHost}
                   >
-                    ↻ Sync Host
+                    Sync
                   </button>
                   <button
                     className="merge-to-host-btn"
@@ -1254,7 +1343,7 @@ function App() {
                     onClick={handleMergeToHost}
                     disabled={merging}
                   >
-                    {merging ? 'Analyzing…' : '🌿 Merge to Host'}
+                    {merging ? 'Analyzing…' : 'Merge to Host'}
                   </button>
                 </>
               )}
@@ -1287,7 +1376,7 @@ function App() {
                   }
                 }}
               >
-                📜 Logs {activityLogs.length > 0 && <span className="btn-counter-badge">{activityLogs.length}</span>}
+                Logs {activityLogs.length > 0 && <span className="btn-counter-badge">{activityLogs.length}</span>}
               </button>
 
               <button
@@ -1299,7 +1388,7 @@ function App() {
               </button>
               <button
                 className="editor-action-btn"
-                title="Save file to disk  (⌘S)"
+                title="Save file to disk (Ctrl+S)"
                 onClick={handleSaveFile}
               >
                 Save
@@ -1308,7 +1397,7 @@ function App() {
                 className={`editor-run-btn ${running ? 'running' : ''}`}
                 disabled={running || !activeFile.endsWith('.py')}
                 onClick={handleRun}
-                title="Run Python script (Multi-file enabled)  (⌘↵)"
+                title="Run Python script (Ctrl+Enter)"
               >
                 {running ? (
                   <><span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} /> Running</>
@@ -1383,6 +1472,7 @@ function App() {
           }}
           followingUserId={followingUserId}
           onFollowUser={setFollowingUserId}
+          onSimulateConflict={triggerSimulatedConflict}
         />
       </div>
 
@@ -1461,22 +1551,27 @@ function App() {
 
       {/* Status bar */}
       <div className="statusbar">
-        <div className="statusbar-item" style={{ gap: 5 }}>
-          <span className={`status-dot ${syncStatus === 'connected' ? 'green' : syncStatus === 'connecting' ? 'yellow pulse' : 'grey'}`} />
-          {syncStatus === 'connected' ? 'Synced' : syncStatus === 'connecting' ? 'Connecting…' : 'Offline'}
+        <div className="statusbar-item clickable" onClick={() => setOutputOpen(o => !o)}>
+          <span className={`statusbar-dot ${syncStatus === 'connected' ? '' : ''}`}
+            style={{ background: syncStatus === 'connected' ? 'rgba(13,15,20,0.5)' : syncStatus === 'connecting' ? 'rgba(13,15,20,0.4)' : 'rgba(13,15,20,0.3)' }}
+          />
+          {syncStatus === 'connected' ? 'Weaver' : syncStatus === 'connecting' ? 'Connecting…' : 'Offline'}
         </div>
         {localUser && (
           <div className="statusbar-item">
-            {localUser.name} {isHost ? '(Host)' : '(Collaborator)'}
+            {localUser.name}
           </div>
         )}
         <div className="statusbar-sep" />
-        <div className="statusbar-item" style={{ cursor: 'pointer' }} onClick={() => setOutputOpen(o => !o)}>
-          {running ? '● Running' : runResults.length > 0 ? `✓ ${runResults[runResults.length-1].exit_code === 0 ? 'OK' : `Exit ${runResults[runResults.length-1].exit_code}`}` : 'Output'}
+        <div className="statusbar-item clickable" onClick={() => setOutputOpen(o => !o)}>
+          {running
+            ? 'Running…'
+            : runResults.length > 0
+              ? runResults[runResults.length-1].exit_code === 0 ? 'OK' : `Exit ${runResults[runResults.length-1].exit_code}`
+              : 'Output'}
         </div>
         <div
-          className="statusbar-item"
-          style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5 }}
+          className="statusbar-item clickable"
           onClick={() => {
             if (outputOpen && bottomPanelTab === 'logs') {
               setOutputOpen(false);
@@ -1485,15 +1580,14 @@ function App() {
               setBottomPanelTab('logs');
             }
           }}
-          title="Toggle collaborator merges and activity logs"
         >
-          📜 Collab Logs ({activityLogs.length})
+          Logs ({activityLogs.length})
         </div>
         <div className="statusbar-item">
-          {activeFile} · Python
+          {activeFile}
         </div>
-        <div className="statusbar-item" style={{ color: 'rgba(255,255,255,0.6)', fontSize: 10 }}>
-          ⌘↵ Run · ⌘S Save · Double-click to rename
+        <div className="statusbar-item" style={{ opacity: 0.6 }}>
+          Ctrl+Enter  Run
         </div>
       </div>
 

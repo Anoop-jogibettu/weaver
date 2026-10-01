@@ -14,6 +14,7 @@ interface UseEditorOptions {
   awareness?: any;
   onChange?: (content: string, view: EditorView) => void;
   onCursorLine?: (line: number) => void;
+  isDraftMode?: boolean;
 }
 
 export function useEditor(
@@ -56,7 +57,17 @@ export function useEditor(
       });
 
       const awareness = optionsRef.current.awareness || null;
-      const initialText = ytext.toString() || optionsRef.current.initialContent || '';
+      let initialText = '';
+      let ycollabExtension = [];
+      
+      if (typeof ytext === 'string') {
+        initialText = ytext || optionsRef.current.initialContent || '';
+      } else {
+        initialText = ytext.toString() || optionsRef.current.initialContent || '';
+        if (!optionsRef.current.isDraftMode) {
+          ycollabExtension = [yCollab(ytext, awareness, { undoManager })];
+        }
+      }
 
       const state = EditorState.create({
         doc: initialText,
@@ -65,7 +76,7 @@ export function useEditor(
           python(),
           indentationMarkers({ highlightActiveBlock: true }),
           oneDark,
-          yCollab(ytext, awareness, { undoManager }),
+          ...ycollabExtension,
           updateListener,
           EditorView.theme({
             '&': { height: '100%', backgroundColor: '#0d0f14' },
