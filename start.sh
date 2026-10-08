@@ -11,7 +11,7 @@ echo ""
 # 1. Python service
 echo "▶ Starting Python FastAPI service (port 8000)..."
 cd "$ROOT/python-service"
-python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload &
+python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload &
 PYTHON_PID=$!
 echo "  PID: $PYTHON_PID"
 

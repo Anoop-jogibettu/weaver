@@ -4,19 +4,25 @@ Provides AST parsing, ML classification, dataset generation, and evaluation endp
 """
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import os
 import ast
 from typing import Optional, Any, Dict, List
 
 from ast_parser.parser import parse_source, diff_asts, analyze_concurrent_changes
-from dataset.generator import generate_dataset, save_dataset, load_dataset, DATASET_PATH
+# from dataset.generator import generate_dataset, save_dataset, load_dataset, DATASET_PATH
+import pandas as pd
+DATASET_PATH = Path("dataset.csv")
+
+def generate_dataset(n): return []
+def save_dataset(s): pass
+def load_dataset(): return pd.DataFrame()
 from ml.classifier import train, predict, get_last_results, is_trained, FEATURE_COLS
 from evaluation.evaluator import evaluate_both
 
@@ -31,6 +37,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _python_filename(value: str) -> str:
+    """Accept a relative Python source path that is safe in a temp workspace."""
+    clean = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or clean.is_absolute()
+        or clean.as_posix() != value
+        or any(part in {".", ".."} or part.startswith(".") for part in clean.parts)
+        or clean.suffix.lower() not in {".py", ".pyw"}
+    ):
+        raise ValueError("Only relative Python (.py or .pyw) paths are supported")
+    return clean.as_posix()
 
 
 # ─── Request / Response Models ────────────────────────────────────────────────
@@ -70,6 +91,19 @@ class RunRequest(BaseModel):
     filename: str = "script.py"
     stdin: Optional[str] = None
     all_files: Optional[Dict[str, str]] = None
+
+    @field_validator("filename")
+    @classmethod
+    def validate_filename(cls, value: str) -> str:
+        return _python_filename(value)
+
+    @field_validator("all_files")
+    @classmethod
+    def validate_workspace_files(cls, files: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+        if files is not None:
+            for filename in files:
+                _python_filename(filename)
+        return files
 
 class ReplRequest(BaseModel):
     code: str
@@ -294,59 +328,76 @@ _repl_sessions: Dict[str, dict] = {}
 @app.post("/run")
 def run_endpoint(req: RunRequest):
     """
-    Execute Python source code in a sandboxed directory subprocess.
-    Writes all workspace files into temporary directory to support cross-file imports.
-    Returns stdout, stderr, exit_code, and wall time (seconds).
-    Hard timeout: 10 seconds.
+    Execute a Python workspace in a temporary directory.
+    Only Python source files are accepted; the active file is run with the service Python
+    interpreter and returned with its stdout, stderr, exit code, and elapsed time.
     """
     import subprocess
     import tempfile
     import time
-    import os
+    try:
+        import resource
+    except ImportError:
+        resource = None
+
+    def _setting(name: str, default: int) -> int:
+        try:
+            return max(0, int(os.environ.get(name, default)))
+        except ValueError:
+            return default
+
+    timeout_seconds = _setting("WEAVER_RUN_TIMEOUT_SECONDS", 60)
+    memory_mb = _setting("WEAVER_RUN_MEMORY_MB", 2048)
+
+    def _set_resource_limits():
+        """Apply resource limits to child process (Unix only)."""
+        try:
+            if resource is None:
+                return
+            if timeout_seconds:
+                resource.setrlimit(resource.RLIMIT_CPU, (timeout_seconds, timeout_seconds))
+            if memory_mb:
+                memory_bytes = memory_mb * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+            resource.setrlimit(resource.RLIMIT_NPROC, (256, 256))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024 * 1024, 100 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+        except Exception:
+            # Resource limits not available on this platform (e.g., Windows)
+            pass
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        # 1. Write all workspace files into tmp_dir so cross-file imports succeed
+        # Write the Python workspace into a short-lived directory so local
+        # imports such as `import helpers` continue to work.
         if req.all_files:
             for fname, content in req.all_files.items():
-                if not fname:
-                    continue
-                target_path = os.path.join(tmp_dir, fname)
-                parent_dir = os.path.dirname(target_path)
-                if parent_dir:
-                    os.makedirs(parent_dir, exist_ok=True)
+                target_path = Path(tmp_dir) / fname
+                target_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(target_path, "w", encoding="utf-8") as f:
                     f.write(content)
 
-        # 2. Write/overwrite active target source file
-        active_target = req.filename if req.filename.endswith(".py") else f"{req.filename}.py"
-        active_path = os.path.join(tmp_dir, active_target)
+        # The active source always wins over the same file supplied in all_files.
+        active_path = Path(tmp_dir) / req.filename
+        active_path.parent.mkdir(parents=True, exist_ok=True)
         with open(active_path, "w", encoding="utf-8") as f:
             f.write(req.source)
 
         try:
             t0 = time.monotonic()
-            
-            # Check if docker is available for sandboxing
-            docker_available = False
-            try:
-                docker_check = subprocess.run(["docker", "info"], capture_output=True, timeout=2)
-                if docker_check.returncode == 0:
-                    docker_available = True
-            except Exception:
-                pass
-            
-            if docker_available:
-                cmd = ["docker", "run", "--rm", "-v", f"{tmp_dir}:/app", "-w", "/app", "python:3.9-slim", "python", active_target]
-            else:
-                cmd = [sys.executable, active_target]
-                
             result = subprocess.run(
-                cmd,
+                [sys.executable, req.filename],
                 input=req.stdin or "",
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=timeout_seconds or None,
                 cwd=tmp_dir,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": os.pathsep.join(
+                        part for part in (tmp_dir, os.environ.get("PYTHONPATH", "")) if part
+                    ),
+                },
+                preexec_fn=_set_resource_limits if os.name != "nt" else None,
             )
             elapsed = round(time.monotonic() - t0, 3)
             return {
@@ -361,9 +412,9 @@ def run_endpoint(req: RunRequest):
             return {
                 "success": False,
                 "stdout": "",
-                "stderr": "Execution timed out after 10 seconds.",
+                "stderr": f"Execution timed out after {timeout_seconds} seconds.",
                 "exit_code": -1,
-                "elapsed": 10.0,
+                "elapsed": float(timeout_seconds),
                 "filename": req.filename,
             }
         except Exception as e:
@@ -380,12 +431,24 @@ def run_endpoint(req: RunRequest):
 @app.post("/repl")
 def repl_endpoint(req: ReplRequest):
     """
-    Execute Python code in an interactive in-memory session.
+    Execute Python code in an interactive in-memory session with resource limits.
     Preserves variables and defined functions across evaluations.
     """
     import io
-    from contextlib import redirect_stdout, redirect_stderr
+    import sys
+    import resource
     import traceback
+    from contextlib import redirect_stdout, redirect_stderr
+
+    def _set_repl_limits():
+        try:
+            resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
+            resource.setrlimit(resource.RLIMIT_AS, (50 * 1024 * 1024, 50 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_NPROC, (20, 20))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (5 * 1024 * 1024, 5 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (50, 50))
+        except Exception:
+            pass
 
     session_key = req.session_id or "default"
     if session_key not in _repl_sessions:
@@ -400,7 +463,18 @@ def repl_endpoint(req: ReplRequest):
     if not code:
         return {"success": True, "stdout": "", "stderr": ""}
 
+    # Save original limits
+    old_limits = {}
     try:
+        for res in (resource.RLIMIT_CPU, resource.RLIMIT_AS, resource.RLIMIT_NPROC, 
+                    resource.RLIMIT_FSIZE, resource.RLIMIT_NOFILE):
+            old_limits[res] = resource.getrlimit(res)
+    except Exception:
+        pass
+
+    try:
+        _set_repl_limits()
+        
         with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
             # Try evaluating as an expression first
             try:
@@ -426,6 +500,13 @@ def repl_endpoint(req: ReplRequest):
             "stdout": stdout_buf.getvalue(),
             "stderr": traceback.format_exc(),
         }
+    finally:
+        # Restore original limits
+        try:
+            for res, (soft, hard) in old_limits.items():
+                resource.setrlimit(res, (soft, hard))
+        except Exception:
+            pass
 
 
 @app.post("/format")

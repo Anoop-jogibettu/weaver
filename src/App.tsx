@@ -47,7 +47,6 @@ import {
 } from './collaboration/store';
 import { diffSource, classifyChanges, runCode, formatCode, lintCode } from './api/client';
 
-// Default starter files
 const DEFAULT_FILES: Record<string, string> = {
   'main.py': `def greet(name: str) -> str:
     return f"Hello, {name}!"
@@ -59,13 +58,13 @@ if __name__ == "__main__":
     print(greet("World"))
     print(add(3, 4))
 `,
-  'utils.py': `def clamp(val, lo, hi):
-    return max(lo, min(hi, val))
+};
 
-def format_table(rows):
-    for row in rows:
-        print("\\t".join(str(c) for c in row))
-`,
+const isPythonFile = (value: string) => /\.(py|pyw)$/i.test(value);
+
+const pythonPath = (value: string) => {
+  const path = value.trim();
+  return isPythonFile(path) ? path : `${path}.py`;
 };
 
 function App() {
@@ -75,7 +74,7 @@ function App() {
   const [isHost, setIsHost]       = useState<boolean>(true);
 
   // ─── Dynamic file state ───────────────────────────────────────────────────
-  const [files, setFiles]           = useState<string[]>(['main.py', 'utils.py']);
+  const [files, setFiles]           = useState<string[]>(['main.py']);
   const [activeFile, setActiveFile] = useState('main.py');
   const [fileContents, setFileContents] = useState<Record<string, string>>({ ...DEFAULT_FILES });
   const prevContents = useRef<Record<string, string>>({ ...DEFAULT_FILES });
@@ -328,8 +327,12 @@ function App() {
 
   // ─── Import file(s) from disk ─────────────────────────────────────────────
   const handleImportFiles = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const picked = Array.from(e.target.files || []);
-    if (!picked.length) return;
+    const picked = Array.from(e.target.files || []).filter((file) => isPythonFile(file.name));
+    if (!picked.length) {
+      toast('Choose one or more Python (.py or .pyw) files.', 'info');
+      e.target.value = '';
+      return;
+    }
     let imported = 0;
     picked.forEach((f) => {
       const reader = new FileReader();
@@ -378,8 +381,7 @@ function App() {
   const handleNewFile = useCallback((explicitPath?: string) => {
     let name: string;
     if (explicitPath) {
-      // Use the path as-is if provided by inline input
-      name = explicitPath;
+      name = pythonPath(explicitPath);
       // Deduplicate if collision
       if (files.includes(name)) {
         const base = name.replace(/\.py$/, '');
@@ -501,7 +503,11 @@ function App() {
   }, []);
 
   const executeRename = useCallback((oldName: string, newName: string) => {
-    const trimmed = newName.trim();
+    if (!newName.trim()) {
+      closeRenameDialog();
+      return;
+    }
+    const trimmed = pythonPath(newName);
     if (!trimmed || trimmed === oldName) {
       closeRenameDialog();
       return;
@@ -615,8 +621,8 @@ function App() {
       toast('Nothing to run — file is empty.', 'info');
       return;
     }
-    if (!activeFile.endsWith('.py')) {
-      toast('Only Python files can be executed.', 'info');
+    if (!isPythonFile(activeFile)) {
+      toast('Only Python files can be run.', 'info');
       return;
     }
     setOutputOpen(true);
@@ -643,7 +649,10 @@ function App() {
   // ─── Code formatting (PEP 8) (Feature 6) ──────────────────────────────────
   const handleFormat = useCallback(async () => {
     const source = fileContents[activeFile];
-    if (!source?.trim() || !activeFile.endsWith('.py')) return;
+    if (!source?.trim() || !isPythonFile(activeFile)) {
+      toast('Formatting is only supported for Python files currently.', 'info');
+      return;
+    }
     setFormatting(true);
     try {
       const res = await formatCode(source);
@@ -767,12 +776,15 @@ function App() {
         } catch { /* collab not ready */ }
       }
 
-      analyzeEdit(content, file, cursorLine);
+      if (isPythonFile(file)) {
+        analyzeEdit(content, file, cursorLine);
+      }
 
       if (changed) {
         if (analyzeTimerRef.current) clearTimeout(analyzeTimerRef.current);
         analyzeTimerRef.current = setTimeout(async () => {
           if (!prev || !content) return;
+          if (!isPythonFile(file)) return; // AST diff only for Python
           setAstStatus('parsing');
           try {
             const diffResult = await diffSource(prev, content, file);
@@ -787,6 +799,10 @@ function App() {
                 setMlStatus('ready');
                 setMlPrediction(result.prediction.prediction);
                 setMlConfidence(result.prediction.confidence);
+                
+                if (result.prediction.label === 1 || result.prediction.prediction.includes("Conflict")) {
+                  toast(`⚠️ AST Merge Conflict Detected: ${result.prediction.explanation}`, 'error');
+                }
               }
             }
           } catch {
@@ -795,7 +811,7 @@ function App() {
         }, 1500);
       }
     },
-    [analyzeEdit],
+    [analyzeEdit, toast],
   );
 
   // ─── Merge to Host & Conflict Resolution Workflow ─────────────────────────
@@ -1194,7 +1210,7 @@ function App() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".py,.txt,.md,.json,.js,.ts,.css,.html"
+        accept=".py,.pyw,text/x-python"
         multiple
         style={{ display: 'none' }}
         onChange={handleImportFiles}
@@ -1289,7 +1305,7 @@ function App() {
                 className="editor-action-btn"
                 title="Format active Python file with PEP 8"
                 onClick={handleFormat}
-                disabled={formatting || !activeFile.endsWith('.py')}
+                disabled={formatting || !isPythonFile(activeFile)}
               >
                 {formatting ? 'Formatting…' : 'Format'}
               </button>
@@ -1328,25 +1344,27 @@ function App() {
                 &gt;&gt;&gt; REPL
               </button>
 
-              {!isHost && (
-                <>
-                  <button
-                    className="sync-host-btn"
-                    title="Pull latest code from Host into your working copy"
-                    onClick={handleSyncFromHost}
-                  >
-                    Sync
-                  </button>
-                  <button
-                    className="merge-to-host-btn"
-                    title="Propose merge of working copy into Host version"
-                    onClick={handleMergeToHost}
-                    disabled={merging}
-                  >
-                    {merging ? 'Analyzing…' : 'Merge to Host'}
-                  </button>
-                </>
-              )}
+              <button
+                className="editor-action-btn"
+                title="Make a copy to edit independently"
+                onClick={() => {
+                  const content = fileContents[activeFile] || '';
+                  const ext = activeFile.split('.').pop();
+                  const base = activeFile.substring(0, activeFile.lastIndexOf('.')) || activeFile;
+                  let newName = `${base}_copy.${ext}`;
+                  let i = 1;
+                  while (files.includes(newName)) {
+                    newName = `${base}_copy${i}.${ext}`;
+                    i++;
+                  }
+                  setFiles((prev) => [...prev, newName]);
+                  setFileContents((fc) => ({ ...fc, [newName]: content }));
+                  setActiveFile(newName);
+                  toast(`Created copy: ${newName}`, 'success');
+                }}
+              >
+                Copy & Edit
+              </button>
 
               {isHost && (
                 <button
@@ -1395,7 +1413,7 @@ function App() {
               </button>
               <button
                 className={`editor-run-btn ${running ? 'running' : ''}`}
-                disabled={running || !activeFile.endsWith('.py')}
+                disabled={running || !isPythonFile(activeFile)}
                 onClick={handleRun}
                 title="Run Python script (Ctrl+Enter)"
               >

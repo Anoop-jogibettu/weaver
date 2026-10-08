@@ -24,12 +24,6 @@ const DEFAULT_CONTENTS: Record<string, string> = {
 def greet(name):
     return f"Hello, {name}!"
 `,
-  'utils.py': `def format_output(value):
-    return str(value).strip()
-
-def clamp(val, lo, hi):
-    return max(lo, min(hi, val))
-`,
   'models.py': `class DataModel:
     def __init__(self, data):
         self.data = data
@@ -76,7 +70,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     initialContentRef.current = initialContent;
   }
 
-  const isDraftMode = !file.endsWith('.md') && !file.endsWith('.txt');
+  const isDraftMode = false;
 
   const { initEditor, destroyEditor, scrollToLine, getContent } = useEditor(containerRef, {
     file,

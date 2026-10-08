@@ -1,82 +1,86 @@
-import React, { useEffect, useRef } from 'react';
-import { Terminal } from 'xterm';
-import { FitAddon } from 'xterm-addon-fit';
-import 'xterm/css/xterm.css';
+import React, { useState } from 'react';
+import { runRepl } from '../api/client';
 
 interface ReplPanelProps {
   sessionId?: string;
 }
 
+interface ConsoleEntry {
+  code: string;
+  stdout: string;
+  stderr: string;
+}
+
 export const ReplPanel: React.FC<ReplPanelProps> = ({ sessionId }) => {
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const term = useRef<Terminal | null>(null);
-  const ws = useRef<WebSocket | null>(null);
+  const [code, setCode] = useState('');
+  const [entries, setEntries] = useState<ConsoleEntry[]>([]);
+  const [running, setRunning] = useState(false);
 
-  useEffect(() => {
-    if (!terminalRef.current) return;
+  const execute = async () => {
+    const snippet = code.trim();
+    if (!snippet || running) return;
 
-    term.current = new Terminal({
-      theme: { background: '#0d0f14', foreground: '#e2e2e2' },
-      cursorBlink: true,
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 13,
-    });
-
-    const fitAddon = new FitAddon();
-    term.current.loadAddon(fitAddon);
-    term.current.open(terminalRef.current);
-    
-    // Fit after a tiny delay to ensure container is fully rendered
-    setTimeout(() => {
-      try { fitAddon.fit(); } catch (e) {}
-    }, 50);
-
-    // Connect to WebSocket
-    ws.current = new WebSocket(`ws://${window.location.hostname}:1234/terminal`);
-
-    ws.current.onopen = () => {
-      term.current?.writeln('\x1b[32m=== Weaver Interactive Terminal ===\x1b[0m');
-      term.current?.writeln('Connected to sandboxed bash shell.');
-      term.current?.writeln('Run "python3 script.py" or use interactive REPL.\r\n');
-    };
-
-    ws.current.onmessage = (event) => {
-      if (typeof event.data === 'string') {
-        term.current?.write(event.data);
-      }
-    };
-
-    term.current.onData((data) => {
-      if (ws.current?.readyState === WebSocket.OPEN) {
-        ws.current.send(data);
-      }
-    });
-
-    const handleResize = () => {
-      try { fitAddon.fit(); } catch (e) {}
-    };
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      ws.current?.close();
-      term.current?.dispose();
-    };
-  }, []);
+    setRunning(true);
+    try {
+      const result = await runRepl(snippet, sessionId);
+      setEntries((previous) => [...previous, {
+        code: snippet,
+        stdout: result.stdout || '',
+        stderr: result.stderr || '',
+      }]);
+      setCode('');
+    } catch (error) {
+      setEntries((previous) => [...previous, {
+        code: snippet,
+        stdout: '',
+        stderr: error instanceof Error ? error.message : 'The Python service could not be reached.',
+      }]);
+    } finally {
+      setRunning(false);
+    }
+  };
 
   return (
-    <div className="repl-panel" style={{ display: 'flex', flexDirection: 'column', height: '100%', backgroundColor: '#0d0f14' }}>
-      <div className="repl-toolbar">
-        <div className="repl-status-badge">
-          <span className="repl-status-dot" style={{ backgroundColor: '#2ea043' }} />
-          <span>Interactive Shell (xterm.js)</span>
-        </div>
+    <div className="python-console">
+      <div className="python-console-toolbar">
+        <span><strong>Python</strong> interactive window</span>
+        <button className="output-action-btn" onClick={() => setEntries([])} disabled={running}>
+          Clear
+        </button>
       </div>
-      <div 
-        ref={terminalRef} 
-        style={{ flex: 1, overflow: 'hidden', padding: '10px' }} 
-        className="xterm-container"
-      />
+
+      <div className="python-console-history" aria-live="polite">
+        {entries.length === 0 && (
+          <div className="output-empty">Run a Python expression or statement below. Variables remain available for this workspace.</div>
+        )}
+        {entries.map((entry, index) => (
+          <div className="python-console-entry" key={`${entry.code}-${index}`}>
+            <pre className="python-console-input">&gt;&gt;&gt; {entry.code}</pre>
+            {entry.stdout && <pre className="output-stdout">{entry.stdout}</pre>}
+            {entry.stderr && <pre className="output-stderr">{entry.stderr}</pre>}
+          </div>
+        ))}
+      </div>
+
+      <div className="python-console-composer">
+        <textarea
+          className="python-console-textarea"
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+          onKeyDown={(event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+              event.preventDefault();
+              execute();
+            }
+          }}
+          placeholder="print('Hello, Weaver')"
+          spellCheck={false}
+          aria-label="Python code"
+        />
+        <button className="editor-run-btn" onClick={execute} disabled={running || !code.trim()}>
+          {running ? 'Running…' : 'Run'}
+        </button>
+      </div>
     </div>
   );
 };

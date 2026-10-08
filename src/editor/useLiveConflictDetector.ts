@@ -19,9 +19,9 @@ import {
   getPeerActiveEdits,
   subscribeAwareness,
   type ActiveNodeInfo,
+  type PeerEditState,
 } from '../collaboration/store';
 import type { LiveConflictState } from './LiveConflictBanner';
-import { classifyChanges } from '../api/client';
 
 const IDLE_STATE: LiveConflictState = {
   detected: false,

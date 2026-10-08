@@ -4,18 +4,20 @@
 
 Weaver is a professional collaborative programming environment designed for concurrent Python development. It combines local-first CRDT synchronization (Yjs/YATA), real-time abstract syntax tree (AST) parsing, and machine learning conflict classification to detect and prevent semantic merge collisions as developers type.
 
+The runner supports `.py` and `.pyw` files, nested packages, and workspace imports. It uses the Python interpreter that starts the FastAPI service, so install third-party packages into that same environment. Defaults are a 60-second timeout and 2 GB memory limit; set `WEAVER_RUN_TIMEOUT_SECONDS=0` and/or `WEAVER_RUN_MEMORY_MB=0` before starting the Python service to remove either limit for local work.
+
 ```
-Concurrent Edits ──► Yjs CRDT Sync ──► Real-time AST Parser ──► ML Conflict Guard ──► Sandboxed Subprocess Runner
+Concurrent Edits ──► Yjs CRDT Sync ──► Real-time AST Parser ──► ML Conflict Guard ──► Python Runner
 ```
 
 ---
 
 ## Key Features
 
-- **Multi-File Workspace**: Open, create, edit, close, and rename Python scripts with real-time multi-tab navigation.
+- **Python Workspace**: Open, create, edit, close, and rename `.py` / `.pyw` files, including nested packages, with real-time multi-tab navigation.
 - **Inline File Renaming**: Rename any file directly from the Explorer sidebar or tab strip with validation and state preservation.
 - **Indentation Guide Lines**: Visual indentation guide lines with active block highlighting for Python control flow and function scopes.
-- **Code Execution Sandbox**: Run scripts directly within the editor with real-time stdout, stderr, execution duration, exit codes, and stdin support.
+- **Python Execution**: Run Python scripts directly within the editor with real-time stdout, stderr, execution duration, exit codes, and stdin support.
 - **Real-Time Collaboration**: Peer presence, live cursor sharing, and conflict-free concurrent editing powered by Yjs CRDTs over WebSockets.
 - **AST Conflict Guard**: Monitors active functions and classes across peers to detect overlapping modifications before commits occur.
 
@@ -52,7 +54,7 @@ Or start them individually:
 
 | Service | Command | Port / URL |
 |---|---|---|
-| **Python Service** | `cd python-service && python3 -m uvicorn main:app --host 0.0.0.0 --port 8000` | `http://localhost:8000/docs` |
+| **Python Service** | `cd python-service && python3 -m uvicorn main:app --host 127.0.0.1 --port 8000` | `http://localhost:8000/docs` |
 | **Node.js Relay** | `cd backend && node server.js` | `ws://localhost:1234` / `http://localhost:1234` |
 | **Frontend UI** | `npm run dev` | `http://localhost:5173` |
 
@@ -94,5 +96,5 @@ Python Service (FastAPI)
     ├── AST Parser (Python ast module & node locator)
     ├── Feature Extractor (12 structural & semantic features)
     ├── ML Conflict Predictor (Gradient Boosting / Random Forest)
-    └── Sandboxed Runner (Subprocess executor with 10s hard timeout)
+    └── Python Runner (subprocess executor with a 10s hard timeout)
 ```

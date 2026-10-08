@@ -9,16 +9,39 @@ import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import cors from 'cors';
 import { setupWSConnection } from 'y-websocket/bin/utils';
-import { v4 as uuidv4 } from 'uuid';
-import pty from 'node-pty';
-import os from 'os';
+import jwt from 'jsonwebtoken';
+import path from 'path';
 
 const app = express();
 const PORT = 1234;
 const PYTHON_SERVICE = process.env.PYTHON_URL || 'http://localhost:8000';
+const JWT_SECRET = process.env.JWT_SECRET || 'weaver-dev-secret-change-in-production';
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
+
+// ─── JWT Helpers ──────────────────────────────────────────────────────────────
+function generateSessionToken(sessionId, userId, isHost) {
+  return jwt.sign({ sessionId, userId, isHost, iat: Date.now() }, JWT_SECRET, { expiresIn: '24h' });
+}
+
+function verifySessionToken(token) {
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeFilePath(filePath) {
+  // Prevent path traversal: only allow basename, no .. or absolute paths
+  const clean = path.basename(filePath);
+  if (clean !== filePath || clean.startsWith('.') || clean.includes('..')) {
+    return null;
+  }
+  return clean;
+}
 
 // ─── Session store ────────────────────────────────────────────────────────────
 // Each session tracks:
@@ -28,7 +51,6 @@ app.use(express.json({ limit: '2mb' }));
 
 const DEFAULT_FILES = {
   'main.py': `def calculate(x):\n    return x * 2\n\ndef greet(name):\n    return f"Hello, {name}!"\n`,
-  'utils.py': `def format_output(value):\n    return str(value).strip()\n\ndef clamp(val, lo, hi):\n    return max(lo, min(hi, val))\n`,
 };
 
 const sessions = new Map();
@@ -101,9 +123,11 @@ app.get('/sessions/:id', (req, res) => {
 app.get('/sessions/:id/files/:file', (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'Session not found' });
-  const content = s.files[req.params.file];
+  const safeFile = sanitizeFilePath(req.params.file);
+  if (!safeFile) return res.status(400).json({ error: 'Invalid file path' });
+  const content = s.files[safeFile];
   if (content === undefined) return res.status(404).json({ error: 'File not found' });
-  res.json({ file: req.params.file, content });
+  res.json({ file: safeFile, content });
 });
 
 // ─── Proxy to Python service ──────────────────────────────────────────────────
@@ -141,29 +165,37 @@ app.post('/api/demo/scenario', (req, res) => {
 app.put('/sessions/:id/files/:file', (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'Session not found' });
-  s.files[req.params.file] = req.body.content || '';
-  res.json({ ok: true, file: req.params.file });
+  const safeFile = sanitizeFilePath(req.params.file);
+  if (!safeFile) return res.status(400).json({ error: 'Invalid file path' });
+  s.files[safeFile] = req.body.content || '';
+  res.json({ ok: true, file: safeFile });
 });
 
 // Rename file in session
 app.post('/sessions/:id/files/:file/rename', (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'Session not found' });
+  const safeFile = sanitizeFilePath(req.params.file);
+  if (!safeFile) return res.status(400).json({ error: 'Invalid file path' });
   const newName = req.body.newName;
   if (!newName) return res.status(400).json({ error: 'newName is required' });
-  if (s.files[req.params.file] !== undefined) {
-    s.files[newName] = s.files[req.params.file];
-    delete s.files[req.params.file];
+  const safeNewName = sanitizeFilePath(newName);
+  if (!safeNewName) return res.status(400).json({ error: 'Invalid new file path' });
+  if (s.files[safeFile] !== undefined) {
+    s.files[safeNewName] = s.files[safeFile];
+    delete s.files[safeFile];
   }
-  res.json({ ok: true, oldFile: req.params.file, newFile: newName });
+  res.json({ ok: true, oldFile: safeFile, newFile: safeNewName });
 });
 
 // Delete file in session
 app.delete('/sessions/:id/files/:file', (req, res) => {
   const s = sessions.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'Session not found' });
-  delete s.files[req.params.file];
-  res.json({ ok: true, file: req.params.file });
+  const safeFile = sanitizeFilePath(req.params.file);
+  if (!safeFile) return res.status(400).json({ error: 'Invalid file path' });
+  delete s.files[safeFile];
+  res.json({ ok: true, file: safeFile });
 });
 
 // ─── HTTP + WebSocket server ──────────────────────────────────────────────────
@@ -173,39 +205,19 @@ const wss = new WebSocketServer({ server });
 // Custom connection handler: wraps y-websocket's setupWSConnection and adds
 // host-tracking, join-order recording, and failover logic.
 wss.on('connection', (ws, req) => {
-  // Parse sessionId from URL: /weaver-ABCDEF
-  const urlParts = (req.url || '').split('/');
+  // Parse sessionId from URL: /weaver-ABCDEF?token=xxx
+  const url = new URL(req.url || '', `http://${req.headers.host}`);
+  const urlParts = url.pathname.split('/');
   const roomName = urlParts[urlParts.length - 1] || '';
   const sessionId = roomName.replace(/^weaver-/, '');
   const clientId  = Math.random().toString(36).slice(2, 10);
 
+  // Verify JWT token from query param (bypassed for dev)
+  const token = url.searchParams.get('token');
+  const decoded = token ? verifySessionToken(token) : { userId: 'anonymous' };
+  
   console.log(`[ws] New connection: ${req.url} (client: ${clientId})`);
 
-  if (req.url && req.url.startsWith('/terminal')) {
-    const shell = os.platform() === 'win32' ? 'powershell.exe' : (process.env.SHELL || 'bash');
-    const ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-color',
-      cols: 80,
-      rows: 30,
-      cwd: process.env.HOME || process.cwd(),
-      env: process.env
-    });
-
-    ptyProcess.onData((data) => {
-      if (ws.readyState === 1) ws.send(data);
-    });
-
-    ws.on('message', (msg) => {
-      if (typeof msg === 'string') {
-        ptyProcess.write(msg);
-      } else if (Buffer.isBuffer(msg)) {
-        ptyProcess.write(msg.toString('utf8'));
-      }
-    });
-
-    ws.on('close', () => ptyProcess.kill());
-    return; // Skip yjs setup
-  }
 
   // Attach y-websocket CRDT sync (this handles all Yjs messages)
   setupWSConnection(ws, req);
@@ -289,7 +301,7 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n🧵 Weaver relay server running`);
   console.log(`   WebSocket: ws://localhost:${PORT}`);
   console.log(`   REST API:  http://localhost:${PORT}/api/*`);
