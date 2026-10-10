@@ -301,7 +301,7 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🧵 Weaver relay server running`);
   console.log(`   WebSocket: ws://localhost:${PORT}`);
   console.log(`   REST API:  http://localhost:${PORT}/api/*`);
