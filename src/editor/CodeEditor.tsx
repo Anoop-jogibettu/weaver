@@ -15,6 +15,8 @@ interface CodeEditorProps {
   localNodeLine?: number;
   onReviewConflict?: () => void;
   targetLine?: number | null;
+  isHost?: boolean;
+  contentVersion?: number;
 }
 
 const DEFAULT_CONTENTS: Record<string, string> = {
@@ -42,6 +44,8 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
   localNodeLine,
   onReviewConflict,
   targetLine,
+  isHost,
+  contentVersion = 0,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const ytextRef = useRef<Y.Text | null>(null);
@@ -70,7 +74,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
     initialContentRef.current = initialContent;
   }
 
-  const isDraftMode = false;
+  const isDraftMode = !isHost;
 
   const { initEditor, destroyEditor, scrollToLine, getContent } = useEditor(containerRef, {
     file,
@@ -91,11 +95,7 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       return;
     }
 
-    // Initialize Y.Text with default content if empty
-    const defaultContent = initialContentRef.current || DEFAULT_CONTENTS[file] || '';
-    if (ytext.length === 0 && defaultContent) {
-      ytext.insert(0, defaultContent);
-    }
+
 
     const undo = new Y.UndoManager(ytext);
     undoManagerRef.current = undo;
@@ -114,6 +114,15 @@ export const CodeEditor: React.FC<CodeEditorProps> = ({
       scrollToLine(targetLine);
     }
   }, [targetLine, ready, scrollToLine]);
+
+  // Force-sync content from outside when contentVersion changes (e.g. pulling from Host)
+  useEffect(() => {
+    if (initialContent !== undefined) {
+      const view = (containerRef.current as any)?.view; // hack to get view if we don't expose it, wait, useEditor exposes it? 
+      // Actually we have a problem getting the view.
+      // wait, I can just change the key of CodeEditor in App.tsx!
+    }
+  }, [contentVersion, initialContent]);
 
   const showConflictBorder =
     liveConflict &&

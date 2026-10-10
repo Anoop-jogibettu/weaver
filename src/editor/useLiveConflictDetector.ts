@@ -112,16 +112,8 @@ export function useLiveConflictDetector() {
             return;
           }
 
-          // 4. Show "checking" briefly while we classify
-          setLiveConflict({
-            ...IDLE_STATE,
-            severity: 'checking',
-            peerName: peerEdits[0].user.name,
-            peerColor: peerEdits[0].user.color,
-            localNode: myNode?.name || '',
-            peerNode: peerEdits[0].activeNode?.name || '(unknown)',
-            localFile: file,
-          });
+          // We intentionally do not set a 'checking' state here anymore,
+          // so the banner doesn't flicker while the user is rapidly typing.
 
           // 5. Run ML classification for each peer
           for (const peer of peerEdits) {

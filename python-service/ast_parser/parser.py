@@ -48,6 +48,7 @@ def node_to_dict(node: ast.AST) -> Optional[dict]:
                 ast.unparse(d) if hasattr(ast, "unparse") else ""
                 for d in node.decorator_list
             ],
+        "body_hash": hashlib.md5(ast.unparse(node).encode()).hexdigest() if hasattr(ast, "unparse") else "",
         }
     elif isinstance(node, ast.ClassDef):
         return {
@@ -59,6 +60,7 @@ def node_to_dict(node: ast.AST) -> Optional[dict]:
                 ast.unparse(b) if hasattr(ast, "unparse") else ""
                 for b in node.bases
             ],
+        "body_hash": hashlib.md5(ast.unparse(node).encode()).hexdigest() if hasattr(ast, "unparse") else "",
         }
     elif isinstance(node, ast.Import):
         return {
