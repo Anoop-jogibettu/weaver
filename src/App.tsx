@@ -98,6 +98,37 @@ function App() {
   // ─── Merge / Conflict state ───────────────────────────────────────────────
   const [conflictData, setConflictData] = useState<ConflictData | null>(null);
   const [merging, setMerging]           = useState(false);
+  const [syncVersion, setSyncVersion]   = useState(0);
+
+  // ─── Layout state ────────────────────────────────────────────────────────
+  const [activeSidebar, setActiveSidebar] = useState<'explorer' | 'collab' | 'search'>('explorer');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(260);
+
+  const isSidebarDragging = useRef(false);
+  const handleSidebarMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isSidebarDragging.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+  const handleSidebarMouseMove = useCallback((e: MouseEvent) => {
+    if (!isSidebarDragging.current) return;
+    setSidebarWidth(Math.max(160, Math.min(e.clientX - 48, window.innerWidth / 2))); // 48 is activity bar width
+  }, []);
+  const handleSidebarMouseUp = useCallback(() => {
+    isSidebarDragging.current = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
+  useEffect(() => {
+    document.addEventListener('mousemove', handleSidebarMouseMove);
+    document.addEventListener('mouseup', handleSidebarMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleSidebarMouseMove);
+      document.removeEventListener('mouseup', handleSidebarMouseUp);
+    };
+  }, [handleSidebarMouseMove, handleSidebarMouseUp]);
 
   // ─── Run / output / activity log workbench state ─────────────────────────
   const [outputOpen, setOutputOpen]         = useState(false);
@@ -148,6 +179,10 @@ function App() {
     setUserId(uid);
     setCurrentUserName(uname);
     setIsHost(host);
+    
+    // Persist to session storage so refresh doesn't drop us
+    sessionStorage.setItem('weaver_session', JSON.stringify({ sid, uid, uname, host }));
+    
     try {
       const { localUser } = initCollaboration(sid, uid, uname, host);
       toast(`Joined workspace ${sid} as ${uname} (${host ? 'Host' : 'Collaborator'})`, 'success');
@@ -217,6 +252,21 @@ function App() {
     }
   }, [fileContents, files, toast]);
 
+  // ─── Restore Session on Refresh ──────────────────────────────────────────
+  useEffect(() => {
+    const saved = sessionStorage.getItem('weaver_session');
+    if (saved && !sessionId) {
+      try {
+        const { sid, uid, uname, host } = JSON.parse(saved);
+        if (sid && uid && uname) {
+          handleJoined(sid, uid, uname, host);
+        }
+      } catch {
+        sessionStorage.removeItem('weaver_session');
+      }
+    }
+  }, [sessionId, handleJoined]);
+
   // ── Sync shared file list for ALL members (host and collaborators alike) ──
   useEffect(() => {
     if (!sessionId) return;
@@ -225,12 +275,16 @@ function App() {
       setFiles((prev) => {
         const newlyAdded = hostFiles.filter((f) => !prev.includes(f));
         if (newlyAdded.length > 0) {
-          newlyAdded.forEach((f) => {
-            const content = getHostYText(f).toString();
-            setFileContents((fc) => ({ ...fc, [f]: content }));
-            prevContents.current[f] = content;
-          });
-          if (!isHost) toast(`New file(s) added to project: ${newlyAdded.join(', ')}`, 'info');
+          // Defer the side-effects outside the setter
+          setTimeout(() => {
+            newlyAdded.forEach((f) => {
+              const content = getHostYText(f).toString();
+              setFileContents((fc) => ({ ...fc, [f]: content }));
+              prevContents.current[f] = content;
+            });
+            setSyncVersion((v) => v + 1);
+            if (!isHost) toast(`New file(s) added to project: ${newlyAdded.join(', ')}`, 'info');
+          }, 0);
           return Array.from(new Set([...prev, ...hostFiles]));
         }
         return prev;
@@ -276,15 +330,16 @@ function App() {
       } else {
         // Someone else became host
         setIsHost(false);
+        const displayName = (newHostUserName && newHostUserName !== 'Unknown') ? newHostUserName : 'A collaborator';
         addActivityLog({
           type: 'presence',
           userId: newHostUserId,
-          userName: newHostUserName,
+          userName: displayName,
           userColor: '#fbbf24',
           isHost: true,
-          action: `${newHostUserName} has taken over as Host`,
+          action: `${displayName} has taken over as Host`,
         });
-        toast(`${newHostUserName} is now the Host.`, 'info');
+        toast(`${displayName} is now the Host.`, 'info');
       }
     });
     return unsub;
@@ -786,6 +841,16 @@ function App() {
           if (!prev || !content) return;
           if (!isPythonFile(file)) return; // AST diff only for Python
           setAstStatus('parsing');
+          
+          try {
+            const lintRes = await lintCode(content, file);
+            if (lintRes.success) {
+              setLintErrors(lintRes.errors || []);
+            }
+          } catch (e) {
+            // fail silently for lint errors
+          }
+
           try {
             const diffResult = await diffSource(prev, content, file);
             setAstStatus('ready');
@@ -993,6 +1058,7 @@ function App() {
       Object.entries(contents).forEach(([f, c]) => {
         prevContents.current[f] = c;
       });
+      setSyncVersion((v) => v + 1);
 
       const localUser = getLocalUser();
       addActivityLog({
@@ -1016,6 +1082,15 @@ function App() {
     }
   }, [currentUserName, files, toast, userId]);
 
+  // ─── Leave Session ────────────────────────────────────────────────────────
+  const handleLeaveSession = useCallback(() => {
+    sessionStorage.removeItem('weaver_session');
+    setSessionId(null);
+    setUserId(null);
+    setCurrentUserName('');
+    toast('Left the session.', 'info');
+  }, [toast]);
+
   // Conflict Modal Handlers
   const handleAcceptCollaboratorMerge = useCallback(() => {
     if (!conflictData) return;
@@ -1035,6 +1110,7 @@ function App() {
 
     setFileContents((prev) => ({ ...prev, [filename]: collaboratorContent }));
     prevContents.current[filename] = collaboratorContent;
+    setSyncVersion((v) => v + 1);
 
     const localUser = getLocalUser();
     addActivityLog({
@@ -1113,6 +1189,7 @@ function App() {
     if (isHost) {
       setFileContents((prev) => ({ ...prev, [filename]: combined }));
       prevContents.current[filename] = combined;
+      setSyncVersion((v) => v + 1);
     }
 
     const localUser = getLocalUser();
@@ -1142,6 +1219,23 @@ function App() {
     );
   }, [conflictData, currentUserName, files, isHost, toast, userId]);
 
+  const handleReviewConflict = useCallback(() => {
+    if (!activeFile) return;
+    const content = fileContents[activeFile] || '';
+    const ext = activeFile.split('.').pop() || '';
+    const base = activeFile.substring(0, activeFile.lastIndexOf('.')) || activeFile;
+    let newName = `${base}_copy.${ext}`;
+    let i = 1;
+    while (files.includes(newName)) {
+      newName = `${base}_copy${i}.${ext}`;
+      i++;
+    }
+    setFiles((prev) => [...prev, newName]);
+    setFileContents((fc) => ({ ...fc, [newName]: content }));
+    setActiveFile(newName);
+    toast(`Created independent working copy: ${newName}`, 'success');
+  }, [activeFile, fileContents, files, toast]);
+
   const handleCustomMerge = useCallback((customCode: string) => {
     if (!conflictData) return;
     const { filename, proposalId, isNewFile, collaboratorName } = conflictData;
@@ -1161,6 +1255,7 @@ function App() {
     if (isHost) {
       setFileContents((prev) => ({ ...prev, [filename]: customCode }));
       prevContents.current[filename] = customCode;
+      setSyncVersion((v) => v + 1);
     }
 
     const localUser = getLocalUser();
@@ -1255,24 +1350,100 @@ function App() {
               </div>
             ))}
           </div>
+          <button
+            className="editor-action-btn"
+            style={{ marginLeft: 16, backgroundColor: 'transparent', border: '1px solid #4a5568', color: '#a0aec0' }}
+            onClick={handleLeaveSession}
+            title="Leave session and return to home"
+          >
+            Leave
+          </button>
         </div>
       </header>
 
       {/* Body: Full Editor Workspace */}
       <div className="workspace">
-        <FileExplorer
-          files={files}
-          activeFile={activeFile}
-          sessionId={sessionId}
-          userCount={users.length}
-          onSelectFile={setActiveFile}
-          onNewFile={handleNewFile}
-          onNewFolder={handleNewFolder}
-          onImportFile={() => fileInputRef.current?.click()}
-          onRenameFile={openRenameDialog}
-          onCloseFile={handleCloseFile}
-          onDeleteFolder={handleDeleteFolder}
-        />
+        <aside className="activity-bar">
+          <div
+            className={`activity-item ${activeSidebar === 'explorer' ? 'active' : ''}`}
+            onClick={() => {
+              if (activeSidebar === 'explorer') setSidebarOpen(!sidebarOpen);
+              else { setActiveSidebar('explorer'); setSidebarOpen(true); }
+            }}
+            title="Explorer"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+          </div>
+          <div
+            className={`activity-item ${activeSidebar === 'collab' ? 'active' : ''}`}
+            onClick={() => {
+              if (activeSidebar === 'collab') setSidebarOpen(!sidebarOpen);
+              else { setActiveSidebar('collab'); setSidebarOpen(true); }
+            }}
+            title="Source Control / Collaboration"
+          >
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <circle cx="18" cy="18" r="3"/>
+              <circle cx="6" cy="6" r="3"/>
+              <path d="M13 6h3a2 2 0 0 1 2 2v7M6 9v12"/>
+            </svg>
+          </div>
+        </aside>
+
+        {sidebarOpen && (
+          <div className="sidebar-container" style={{ width: `${sidebarWidth}px` }}>
+            {activeSidebar === 'explorer' && (
+              <FileExplorer
+                files={files}
+                activeFile={activeFile}
+                sessionId={sessionId}
+                userCount={users.length}
+                onSelectFile={setActiveFile}
+                onNewFile={handleNewFile}
+                onNewFolder={handleNewFolder}
+                onImportFile={() => fileInputRef.current?.click()}
+                onRenameFile={openRenameDialog}
+                onCloseFile={handleCloseFile}
+                onDeleteFolder={handleDeleteFolder}
+              />
+            )}
+            {activeSidebar === 'collab' && (
+              <CollabPanel
+                users={users}
+                localUser={localUser}
+                sessionId={sessionId}
+                localChanges={localChanges}
+                remoteChanges={remoteChanges}
+                astStatus={astStatus}
+                mlStatus={mlStatus}
+                mlPrediction={mlPrediction}
+                mlConfidence={mlConfidence}
+                conflictCount={conflictCount}
+                syncStatus={syncStatus}
+                liveConflict={liveConflict}
+                localActiveNode={localActiveNode}
+                onShowConflict={handleMergeToHost}
+                activityLogs={activityLogs}
+                onOpenLogs={() => {
+                  setOutputOpen(true);
+                  setBottomPanelTab('logs');
+                }}
+                followingUserId={followingUserId}
+                onFollowUser={setFollowingUserId}
+                onSimulateConflict={triggerSimulatedConflict}
+              />
+            )}
+            <div
+              onMouseDown={handleSidebarMouseDown}
+              style={{
+                position: 'absolute', right: -3, top: 0, bottom: 0, width: 6,
+                cursor: 'col-resize', zIndex: 10
+              }}
+            />
+          </div>
+        )}
 
         {/* Editor + Output */}
         <main className="editor-area">
@@ -1300,71 +1471,33 @@ function App() {
             <div style={{ flex: 1 }} />
 
             {/* Editor actions: Format, Snapshots, Comments, REPL, Open, Save, Merge/Sync, Run */}
-            <div className="editor-actions" style={{ gap: 6, flexWrap: 'wrap' }}>
+            <div className="editor-actions" style={{ gap: 4 }}>
               <button
                 className="editor-action-btn"
-                title="Format active Python file with PEP 8"
+                title="Format Code"
                 onClick={handleFormat}
                 disabled={formatting || !isPythonFile(activeFile)}
               >
-                {formatting ? 'Formatting…' : 'Format'}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
               </button>
 
               <button
                 className={`editor-action-btn ${commentsOpen ? 'active' : ''}`}
-                title="Inline Code Annotations & Review Comments"
+                title="Inline Comments"
                 onClick={() => setCommentsOpen(!commentsOpen)}
               >
-                Comments
-                {openCommentsCount > 0 && (
-                  <span className="btn-counter-badge accent">{openCommentsCount}</span>
-                )}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
               </button>
 
               <button
                 className="editor-action-btn"
-                title="Project Snapshots & Time Travel"
+                title="Snapshots"
                 onClick={() => setSnapshotsOpen(true)}
               >
-                Snapshots
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
               </button>
 
-              <button
-                className={`editor-action-btn ${outputOpen && bottomPanelTab === 'repl' ? 'active' : ''}`}
-                title="Interactive Python Console (REPL)"
-                onClick={() => {
-                  if (outputOpen && bottomPanelTab === 'repl') {
-                    setOutputOpen(false);
-                  } else {
-                    setOutputOpen(true);
-                    setBottomPanelTab('repl');
-                  }
-                }}
-              >
-                &gt;&gt;&gt; REPL
-              </button>
-
-              <button
-                className="editor-action-btn"
-                title="Make a copy to edit independently"
-                onClick={() => {
-                  const content = fileContents[activeFile] || '';
-                  const ext = activeFile.split('.').pop();
-                  const base = activeFile.substring(0, activeFile.lastIndexOf('.')) || activeFile;
-                  let newName = `${base}_copy.${ext}`;
-                  let i = 1;
-                  while (files.includes(newName)) {
-                    newName = `${base}_copy${i}.${ext}`;
-                    i++;
-                  }
-                  setFiles((prev) => [...prev, newName]);
-                  setFileContents((fc) => ({ ...fc, [newName]: content }));
-                  setActiveFile(newName);
-                  toast(`Created copy: ${newName}`, 'success');
-                }}
-              >
-                Copy & Edit
-              </button>
+              <div className="action-sep" />
 
               {isHost && (
                 <button
@@ -1382,45 +1515,74 @@ function App() {
                 </button>
               )}
 
+              {!isHost && (
+                <>
+                  <button
+                    className="sync-host-btn"
+                    title="Pull latest code from Host (overwrites local draft)"
+                    onClick={handleSyncFromHost}
+                    disabled={merging}
+                  >
+                    ↓ Sync from Host
+                  </button>
+                  <button
+                    className="sync-host-btn accent"
+                    title="Propose your local changes to be merged into the Host workspace"
+                    onClick={handleMergeToHost}
+                    disabled={merging}
+                    style={{ backgroundColor: '#10b981', borderColor: '#059669', color: '#fff' }}
+                  >
+                    ↑ Propose Merge
+                  </button>
+                </>
+              )}
+
+              <div className="action-sep" />
+
+              {/* View Toggles */}
               <button
-                className={`activity-log-toggle-btn ${outputOpen && bottomPanelTab === 'logs' ? 'active' : ''}`}
-                title="View collaborator merges, file operations, and workspace activity log"
+                className={`editor-action-btn ${outputOpen && bottomPanelTab === 'repl' ? 'active' : ''}`}
+                title="Toggle REPL"
                 onClick={() => {
-                  if (outputOpen && bottomPanelTab === 'logs') {
-                    setOutputOpen(false);
-                  } else {
-                    setOutputOpen(true);
-                    setBottomPanelTab('logs');
-                  }
+                  if (outputOpen && bottomPanelTab === 'repl') setOutputOpen(false);
+                  else { setOutputOpen(true); setBottomPanelTab('repl'); }
                 }}
               >
-                Logs {activityLogs.length > 0 && <span className="btn-counter-badge">{activityLogs.length}</span>}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
               </button>
 
               <button
-                className="editor-action-btn"
-                title="Import file(s) from disk"
-                onClick={() => fileInputRef.current?.click()}
+                className={`editor-action-btn ${outputOpen && bottomPanelTab === 'logs' ? 'active' : ''}`}
+                title="Toggle Logs"
+                onClick={() => {
+                  if (outputOpen && bottomPanelTab === 'logs') setOutputOpen(false);
+                  else { setOutputOpen(true); setBottomPanelTab('logs'); }
+                }}
               >
-                Open
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
               </button>
-              <button
-                className="editor-action-btn"
-                title="Save file to disk (Ctrl+S)"
-                onClick={handleSaveFile}
-              >
-                Save
-              </button>
+
+              <div className="action-sep" />
+
               <button
                 className={`editor-run-btn ${running ? 'running' : ''}`}
+                style={{
+                  background: 'transparent',
+                  color: 'var(--green)',
+                  padding: '2px 6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  border: 'none',
+                  cursor: running ? 'not-allowed' : 'pointer'
+                }}
                 disabled={running || !isPythonFile(activeFile)}
                 onClick={handleRun}
-                title="Run Python script (Ctrl+Enter)"
+                title="Run Script"
               >
                 {running ? (
-                  <><span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} /> Running</>
+                  <span className="spinner" style={{ width: 10, height: 10, borderWidth: 1.5 }} />
                 ) : (
-                  '▶ Run'
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                 )}
               </button>
             </div>
@@ -1430,7 +1592,7 @@ function App() {
           <div className="editor-files-wrap">
             {files.map((f) => (
               <div
-                key={f}
+                key={`${f}-${syncVersion}`}
                 style={{ display: f === activeFile ? 'flex' : 'none', flex: 1, overflow: 'hidden', flexDirection: 'column' }}
               >
                 <CodeEditor
@@ -1440,8 +1602,9 @@ function App() {
                   liveConflict={f === activeFile ? liveConflict : undefined}
                   localNodeName={f === activeFile ? localActiveNode?.name : undefined}
                   localNodeLine={f === activeFile ? localActiveNode?.line_start : undefined}
-                  onReviewConflict={handleMergeToHost}
+                  onReviewConflict={handleReviewConflict}
                   targetLine={f === activeFile ? targetLine : undefined}
+                  isHost={isHost}
                 />
               </div>
             ))}
@@ -1463,35 +1626,10 @@ function App() {
               onClearLogs={clearActivityLogs}
               onSelectFile={setActiveFile}
               sessionId={sessionId || undefined}
+              lintErrors={lintErrors}
             />
           )}
         </main>
-
-        {/* Right panel */}
-        <CollabPanel
-          users={users}
-          localUser={localUser}
-          sessionId={sessionId}
-          localChanges={localChanges}
-          remoteChanges={remoteChanges}
-          astStatus={astStatus}
-          mlStatus={mlStatus}
-          mlPrediction={mlPrediction}
-          mlConfidence={mlConfidence}
-          conflictCount={conflictCount}
-          syncStatus={syncStatus}
-          liveConflict={liveConflict}
-          localActiveNode={localActiveNode}
-          onShowConflict={handleMergeToHost}
-          activityLogs={activityLogs}
-          onOpenLogs={() => {
-            setOutputOpen(true);
-            setBottomPanelTab('logs');
-          }}
-          followingUserId={followingUserId}
-          onFollowUser={setFollowingUserId}
-          onSimulateConflict={triggerSimulatedConflict}
-        />
       </div>
 
       {/* Snapshots Modal Dialog (Feature 3) */}

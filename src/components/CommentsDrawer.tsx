@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   CodeComment,
   getComments,
@@ -27,6 +27,34 @@ export const CommentsDrawer: React.FC<CommentsDrawerProps> = ({
   const [newLine, setNewLine] = useState<number>(currentLine);
   const [newText, setNewText] = useState('');
   const [replyInputs, setReplyInputs] = useState<Record<string, string>>({});
+  
+  const [width, setWidth] = useState(320);
+  const isDragging = useRef(false);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isDragging.current) return;
+    setWidth(Math.max(250, Math.min(window.innerWidth - e.clientX, window.innerWidth * 0.7)));
+  }, []);
+  const handleMouseUp = useCallback(() => {
+    isDragging.current = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [handleMouseMove, handleMouseUp]);
 
   useEffect(() => {
     setNewLine(currentLine || 1);
@@ -57,7 +85,14 @@ export const CommentsDrawer: React.FC<CommentsDrawerProps> = ({
   const filteredComments = comments.filter((c) => (filter === 'open' ? !c.resolved : true));
 
   return (
-    <div className="comments-drawer">
+    <div className="comments-drawer" style={{ width: `${width}px` }}>
+      <div 
+        onMouseDown={handleMouseDown}
+        style={{
+          position: 'absolute', left: -3, top: 0, bottom: 0, width: 6,
+          cursor: 'col-resize', zIndex: 10
+        }}
+      />
       <div className="comments-drawer-header">
         <div className="comments-drawer-title">
           <span className="comments-icon">💬</span>

@@ -1,23 +1,23 @@
 {
   "algorithm": "random_forest",
-  "n_samples": 100000,
-  "n_train": 80000,
-  "n_test": 20000,
-  "n_compatible": 50000,
-  "n_conflict": 50000,
-  "training_time_s": 0.4987,
+  "n_samples": 80658,
+  "n_train": 64526,
+  "n_test": 16132,
+  "n_compatible": 80158,
+  "n_conflict": 500,
+  "training_time_s": 0.3687,
   "accuracy": 1.0,
   "precision": 1.0,
   "recall": 1.0,
   "f1": 1.0,
   "confusion_matrix": [
     [
-      10000,
+      16032,
       0
     ],
     [
       0,
-      10000
+      100
     ]
   ],
   "false_positives": 0,
