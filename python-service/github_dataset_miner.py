@@ -41,21 +41,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ast_parser.parser import parse_source, diff_asts, analyze_concurrent_changes
 
 # ── GitHub API Setup ─────────────────────────────────────────────────────────
-# Read token from env var OR from a local .github_token file (more secure)
+# Read token from env var OR from a .env file (more secure)
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-if not GITHUB_TOKEN:
-    token_file = Path(__file__).parent / ".github_token"
-    if token_file.exists():
-        t = token_file.read_text().strip()
-        if t and not t.startswith("ghp_paste"):
-            GITHUB_TOKEN = t
 
 HEADERS = {"Accept": "application/vnd.github.v3+json"}
 if GITHUB_TOKEN:
     HEADERS["Authorization"] = f"token {GITHUB_TOKEN}"
     print("✓ GitHub PAT detected — using authenticated requests (5000 req/hr)")
 else:
-    print("⚠ No token found. Add it to python-service/.github_token file")
+    print("⚠ No token found. Add it to .env file")
 
 BASE_URL = "https://api.github.com"
 
