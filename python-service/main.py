@@ -16,17 +16,15 @@ import ast
 from typing import Optional, Any, Dict, List
 
 from ast_parser.parser import parse_source, diff_asts, analyze_concurrent_changes
+# from dataset.generator import generate_dataset, save_dataset, load_dataset, DATASET_PATH
+import pandas as pd
+DATASET_PATH = Path("dataset.csv")
+
+def generate_dataset(n): return []
+def save_dataset(s): pass
+def load_dataset(): return pd.DataFrame()
 from ml.classifier import train, predict, get_last_results, is_trained, FEATURE_COLS
 from evaluation.evaluator import evaluate_both
-
-DATASET_PATH = Path("dataset_real.csv")
-
-def load_dataset():
-    import pandas as pd
-    if not DATASET_PATH.exists():
-        raise Exception(f"{DATASET_PATH} not found. Please run the miner first.")
-    df = pd.read_csv(DATASET_PATH)
-    return df
 
 import joblib
 
@@ -223,7 +221,12 @@ def train_endpoint(req: TrainRequest):
     Generate synthetic dataset and train the ML classifier.
     Returns training metrics.
     """
+    # Generate dataset
+    samples = generate_dataset(req.n_samples)
+    save_dataset(samples)
+
     # Load and train
+    import pandas as pd
     df = load_dataset()
     results = train(df, algorithm=req.algorithm)
     return {"success": True, "results": results}
@@ -252,6 +255,7 @@ def evaluate_endpoint():
     if not DATASET_PATH.exists():
         raise HTTPException(status_code=400, detail="Dataset not found. Call /train first.")
 
+    import pandas as pd
     df = load_dataset()
     model = joblib.load(Path(__file__).parent / "ml" / "model.joblib")
     results = evaluate_both(df, model)
@@ -263,6 +267,7 @@ def dataset_stats():
     """Return statistics about the current dataset."""
     if not DATASET_PATH.exists():
         return {"exists": False}
+    import pandas as pd
     df = load_dataset()
     return {
         "exists": True,

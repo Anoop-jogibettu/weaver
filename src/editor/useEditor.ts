@@ -1,7 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { EditorView, ViewUpdate, keymap } from '@codemirror/view';
+import { EditorView, ViewUpdate } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
-import { insertTab, indentMore, indentLess } from '@codemirror/commands';
 import { basicSetup } from 'codemirror';
 import { python } from '@codemirror/lang-python';
 import { yCollab } from 'y-codemirror.next';
@@ -70,22 +69,10 @@ export function useEditor(
         }
       }
 
-      const customTabBinding = {
-        key: "Tab",
-        run: (view: EditorView) => {
-          if (view.state.selection.ranges.some((r) => !r.empty)) {
-            return indentMore(view);
-          }
-          return insertTab(view);
-        },
-        shift: indentLess
-      };
-
       const state = EditorState.create({
         doc: initialText,
         extensions: [
           basicSetup,
-          keymap.of([customTabBinding]),
           python(),
           indentationMarkers({ highlightActiveBlock: true }),
           oneDark,

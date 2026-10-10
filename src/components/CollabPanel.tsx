@@ -286,14 +286,19 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
             <span className="panel-row-label">Parser</span>
             <span className="panel-row-value">
               {astStatus === 'idle' && <span className="state-label muted">idle</span>}
-              {astStatus === 'parsing' && <span className="state-label warn">parsing</span>}
-              {astStatus === 'ready' && <span className="state-label muted">ready</span>}
+              {astStatus === 'parsing' && (
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                  <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />
+                  <span style={{ color: 'var(--yellow)' }}>parsing</span>
+                </span>
+              )}
+              {astStatus === 'ready' && <span className="state-label ok">ready</span>}
               {astStatus === 'error' && <span className="state-label error">error</span>}
             </span>
           </div>
           <div className="panel-row">
             <span className="panel-row-label">Conflicts</span>
-            <span className={`panel-row-value ${conflictCount > 0 ? 'error' : 'muted'}`}>
+            <span className={`panel-row-value ${conflictCount > 0 ? 'error' : ''}`}>
               {conflictCount}
             </span>
           </div>
@@ -306,31 +311,50 @@ export const CollabPanel: React.FC<CollabPanelProps> = ({
             <span className="panel-row-label">Status</span>
             <span className="panel-row-value">
               {mlStatus === 'idle' && <span className="state-label muted">idle</span>}
-              {mlStatus === 'classifying' && <span className="state-label warn">analyzing</span>}
-              {mlStatus === 'ready' && <span className="state-label muted">ready</span>}
+              {mlStatus === 'classifying' && (
+                <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                  <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />
+                  <span style={{ color: 'var(--yellow)' }}>analyzing</span>
+                </span>
+              )}
+              {mlStatus === 'ready' && <span className="state-label ok">ready</span>}
             </span>
           </div>
           <div className="panel-row">
             <span className="panel-row-label">Prediction</span>
             <span className="panel-row-value">
-              {mlPrediction === 'Compatible' && <span className="state-label muted">compatible</span>}
-              {mlPrediction === 'Potential Conflict' && <span className="state-label error">conflict</span>}
-              {mlPrediction && mlPrediction !== 'Compatible' && mlPrediction !== 'Potential Conflict' && (
-                <span className="state-label muted">{mlPrediction.toLowerCase()}</span>
+              {mlPrediction === 'Compatible' && (
+                <span className="badge badge-compatible">compatible</span>
               )}
-              {!mlPrediction && <span className="state-label muted">—</span>}
+              {mlPrediction === 'Potential Conflict' && (
+                <span className="badge badge-conflict">conflict</span>
+              )}
+              {mlPrediction && mlPrediction !== 'Compatible' && mlPrediction !== 'Potential Conflict' && (
+                <span className="badge badge-uncertain">{mlPrediction}</span>
+              )}
+              {!mlPrediction && <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>—</span>}
             </span>
           </div>
           <div className="panel-row">
             <span className="panel-row-label">Confidence</span>
             <span className="panel-row-value">
               {mlConfidence > 0 ? (
-                <span className="state-label muted">{(mlConfidence * 100).toFixed(0)}%</span>
+                <span style={{ color: mlConfidence >= 0.7 ? 'var(--green)' : 'var(--yellow)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                  {(mlConfidence * 100).toFixed(1)}%
+                </span>
               ) : (
-                <span className="state-label muted">—</span>
+                <span style={{ color: 'var(--text-muted)' }}>—</span>
               )}
             </span>
           </div>
+          {mlConfidence > 0 && (
+            <div className="conf-bar-track">
+              <div
+                className={`conf-bar-fill ${mlConfidence >= 0.7 ? 'ok' : 'warn'}`}
+                style={{ width: `${mlConfidence * 100}%` }}
+              />
+            </div>
+          )}
         </div>
 
         {/* ── Workspace ID ─────────────────────────────────────────────────── */}
